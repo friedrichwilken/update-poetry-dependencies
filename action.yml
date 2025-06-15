@@ -170,7 +170,7 @@ runs:
       run: |
         echo "::group::Creating PR Body"
         # Format passed packages
-        echo "## Updated packages:" >> package_list.txt
+        echo "## ✅ Updated packages:" >> package_list.txt
         if [ -n "${{ steps.update_test.outputs.passed_packages }}" ]; then
           echo "${{ steps.update_test.outputs.passed_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
         else
@@ -178,7 +178,7 @@ runs:
         fi
 
         # Format failed packages
-        echo "## Packages failed to update:" >> package_list.txt
+        echo "## 🛑 Packages failed to update:" >> package_list.txt
         if [ -n "${{ steps.update_test.outputs.failed_packages }}" ]; then
           echo "${{ steps.update_test.outputs.failed_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
         else
@@ -186,7 +186,7 @@ runs:
         fi
 
         # Format skipped packages
-        echo "## Package without updates:" >> package_list.txt
+        echo "## ⏭ Package without updates:" >> package_list.txt
         if [ -n "${{ steps.update_test.outputs.skipped_packages }}" ]; then
           echo "${{ steps.update_test.outputs.skipped_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
         else
@@ -204,7 +204,7 @@ runs:
       shell: bash
       env:
         PACKAGES: ${{ steps.format_lists.outputs.packages }}
-        BRANCH_NAME: update-successful-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        BRANCH_NAME: update-packages-${{ github.run_id }}-${{ github.run_attempt }}
         GH_TOKEN: ${{ inputs.github_token }}
         PR_TITLE: ${{ inputs.pr-title-prefix }}Update and successfully test packages
         LABELS: ${{ inputs.labels }}
