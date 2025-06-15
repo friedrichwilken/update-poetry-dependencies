@@ -1,0 +1,226 @@
+name: 'Poetry Update'
+description: 'Runs `poetry update`, checks for newer dependencies and tests the changes. Creates a pull request if any updates are available.'
+author: 'Friedrich Wilken'
+inputs:
+  python-version:
+    description: "The python version to use with poetry."
+    default: '3.12.00'
+  poetry-version:
+    description: "The poetry version to use."
+    default: '2.0.0'
+  directory:
+    description: "The directory of the project files."
+    default: './'
+  pr-title-prefix:
+    description: 'A prefix that gets prependet to the PR title.'
+    default: ''
+  pr-labels:
+    description: 'A comma or newline separated list of labels added to the PR.'
+    default: ''
+  test-command:
+    description: 'A command for a test to run after updating every package.'
+    default: ''
+  github_token:
+    description: 'GitHub token for the PR creation.'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check compatible version
+      run: |
+        min_python_version="3.10"
+        min_poetry_version="1.2"
+        if [ "$(printf '%s\n' "$min_python_version" "${{ inputs.python-version }}" | sort -V | head -n1)" != "$min_python_version" ]; then
+          echo "Less than the minimum required python version: ${min_python_version}, exiting workflow"
+          echo "RUN_UPDATE=false" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        if [ "$(printf '%s\n' "$min_poetry_version" "${{ inputs.poetry-version }}" | sort -V | head -n1)" != "$min_poetry_version" ]; then
+          echo "Less than the minimum required poetry version: ${min_poetry_version}, exiting workflow"
+          echo "RUN_UPDATE=false" >> $GITHUB_ENV
+          exit 0
+        fi
+      shell: bash
+
+    - name: Check out repository
+      if: env.RUN_UPDATE != 'false'
+      uses: actions/checkout@v4
+
+    - name: Set up python
+      if: env.RUN_UPDATE != 'false'
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Poetry
+      if: env.RUN_UPDATE != 'false'
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ inputs.poetry-version }}
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+        installer-parallel: true
+
+    - name: Check if poetry.lock exists
+      working-directory: ${{ inputs.directory }}
+      if: env.RUN_UPDATE != 'false'
+      shell: bash
+      run: |
+        if [ -f "poetry.lock" ]; then
+          echo "poetry.lock file found, running poetry update."
+        else
+          echo "poetry.lock file not found, skipping poetry update."
+          echo "RUN_UPDATE=false" >> $GITHUB_ENV
+        fi
+
+    - name: Install all project dependencies via Poetry
+      shell: bash
+      run: |
+        echo "::group::installing packages"
+        poetry install
+        echo "::endgroup::"
+
+    - name: Get dependeny names
+      id: get_packages
+      shell: bash
+      run: |
+        packages=$(poetry show -T | awk '{print $1}' | paste -sd "," -)
+        echo "packages=$packages" >> $GITHUB_OUTPUT
+
+    - name: Show package array
+      shell: bash
+      run: |
+        echo "::group::installing packages"
+        echo "Packages: ${{ steps.get_packages.outputs.packages }}"
+        echo "::endgroup::"
+
+    - name: Update and test packages
+      id: update_test
+      env:
+        TEST_COMMAND: "${{ inputs.test-command }}"
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_EMAIL: ${{ github.actor }}@users.noreply.github.com
+      shell: bash
+      run: |
+        # Split the comma-separated package list into an array
+        IFS=',' read -ra pkgs <<< "${{ steps.get_packages.outputs.packages }}"
+        failed=""
+        passed=""
+
+        # Configure git user for commits
+        git config user.name "${GITHUB_ACTOR}"
+        git config user.email "${GITHUB_EMAIL}"
+
+        for pkg in "${pkgs[@]}"; do
+          echo "::group::updating package $pkg"
+          echo "Updating $pkg"
+          # Capture the output of poetry update
+          update_output=$(poetry update "$pkg" 2>&1)
+          echo "$update_output"
+          # Check if poetry says there's nothing to update
+          if echo "$update_output" | grep -q "No dependencies to install or update"; then
+            echo "No update available for $pkg, skipping test and commit."
+            skipped="${skipped}${pkg},"
+            echo "::endgroup::"
+            continue
+          fi
+
+          # Check if test command is provided
+          if [ -z "$TEST_COMMAND" ]; then
+            echo "No test command provided, skipping tests for $pkg."
+            test_passed=true
+          else
+            echo "Running test command: $TEST_COMMAND"
+            if bash -c "$TEST_COMMAND"; then
+              echo "Test passed for $pkg"
+              test_passed=true
+            else
+              echo "Test failed for $pkg, undoing changes..."
+              git reset --hard
+              test_passed=false
+            fi
+          fi
+
+          if [ "$test_passed" = true ]; then
+            passed="${passed}${pkg},"
+            git add . || true
+            git commit -m "Update and successfully test $pkg" || true
+          else
+            failed="${failed}${pkg},"
+          fi
+
+          echo "::endgroup::"
+        done
+
+        # Remove trailing commas
+        failed="${failed%,}"
+        passed="${passed%,}"
+        skipped="${skipped%,}"
+
+        # Export the failed and passed package names as step outputs
+        echo "failed_packages=$failed" >> $GITHUB_OUTPUT
+        echo "passed_packages=$passed" >> $GITHUB_OUTPUT
+        echo "skipped_packages=$skipped" >> $GITHUB_OUTPUT
+
+    - name: Format package lists for PR
+      id: format_lists
+      shell: bash
+      run: |
+        echo "::group::Creating PR Body"
+        # Format passed packages
+        echo "## Updated packages:" >> package_list.txt
+        if [ -n "${{ steps.update_test.outputs.passed_packages }}" ]; then
+          echo "${{ steps.update_test.outputs.passed_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
+        else
+          echo "None" >> package_list.txt
+        fi
+
+        # Format failed packages
+        echo "## Packages failed to update:" >> package_list.txt
+        if [ -n "${{ steps.update_test.outputs.failed_packages }}" ]; then
+          echo "${{ steps.update_test.outputs.failed_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
+        else
+          echo "None" >> package_list.txt
+        fi
+
+        # Format skipped packages
+        echo "## Package without updates:" >> package_list.txt
+        if [ -n "${{ steps.update_test.outputs.skipped_packages }}" ]; then
+          echo "${{ steps.update_test.outputs.skipped_packages }}" | sed 's/,/\n- /g' | sed '1s/^/- /' >> package_list.txt
+        else
+          echo "None" >> package_list.txt
+        fi
+
+        # Set outputs
+        echo "packages<<EOF" >> $GITHUB_OUTPUT
+        cat package_list.txt >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        cat package_list.txt
+        echo "::endgroup::"
+
+    - name: Create PR
+      shell: bash
+      env:
+        PACKAGES: ${{ steps.format_lists.outputs.packages }}
+        BRANCH_NAME: update-successful-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_TITLE: ${{ inputs.pr-title-prefix }}Update and successfully test packages
+      run: |
+        echo "::group::Creating PR"
+
+        git fetch origin main
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+          git checkout -b "$BRANCH_NAME"
+          git push origin "$BRANCH_NAME"
+          gh pr create \
+            --title "$PR_TITLE" \
+            --body "$PACKAGES" \
+            --head "$BRANCH_NAME"
+        else
+          echo "No new commits, no PR."
+        fi
+
+        echo "::endgroup::"
+
