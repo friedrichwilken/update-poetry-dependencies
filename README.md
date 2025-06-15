@@ -1,12 +1,14 @@
 ## Poetry Update GitHub Action
 
+A GitHub Action to update Poetry dependencies, that ensures to not break anything by running tests after each package update.
+
 This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzylabs/gha-poetry-update) but heavily modified. It updates your dependencies using [Poetry](https://python-poetry.org/), runs tests (optionally), and creates a pull request with the results.
 
 ### Features
 
 1. Each updated package is committed separately.
 2. Optionally test each update with a custom command —only successful updates are committed.
-3. Add labels to the created pull request.
+3. Add labels and PR title prefixes to resulting pull request, to integrate with your CI/CD workflows.
 
 ### Inputs
 
@@ -16,7 +18,7 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 | poetry-version    | The Poetry version to use.                                         | `2.0.0`     | no         |
 | directory         | The directory of the project files.                                | `./`        | no         |
 | pr-title-prefix   | A prefix for the PR title.                                         | `""`        | no         |
-| pr-labels         | Comma or newline separated list of labels for the PR.              | `""`      | no         |
+| pr-labels         | A comma separated list of labels for the PR.              | `""`      | no         |
 | test-command      | A command to run tests after each update.                          | `""`        | no         |
 | github_token      | GitHub token for PR creation.                                      |             | **yes**    |
 
