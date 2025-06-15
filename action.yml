@@ -169,6 +169,8 @@ runs:
       shell: bash
       run: |
         echo "::group::Creating PR Body"
+        echo "Workflow details: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> package_list.txt
+
         # Format passed packages
         echo "## ✅ Updated packages:" >> package_list.txt
         if [ -n "${{ steps.update_test.outputs.passed_packages }}" ]; then
