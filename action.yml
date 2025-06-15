@@ -1,5 +1,5 @@
-name: 'Poetry Update'
-description: 'Runs `poetry update`, checks for newer dependencies and tests the changes. Creates a pull request if any updates are available.'
+name: 'update poetry dependencies'
+description: 'Runs `poetry update` for each package and creates a PR.'
 author: 'Friedrich Wilken'
 inputs:
   python-version:
