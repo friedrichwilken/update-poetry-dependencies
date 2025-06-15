@@ -1,0 +1,14 @@
+name: 'check action'
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Lint `action.yml`
+        uses: raven-actions/actionlint@v2
