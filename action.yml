@@ -207,6 +207,7 @@ runs:
         BRANCH_NAME: update-successful-packages-${{ github.run_id }}-${{ github.run_attempt }}
         GH_TOKEN: ${{ inputs.github_token }}
         PR_TITLE: ${{ inputs.pr-title-prefix }}Update and successfully test packages
+        LABELS: ${{ inputs.labels }}
       run: |
         echo "::group::Creating PR"
 
@@ -217,7 +218,8 @@ runs:
           gh pr create \
             --title "$PR_TITLE" \
             --body "$PACKAGES" \
-            --head "$BRANCH_NAME"
+            --head "$BRANCH_NAME" \
+            --label "$LABELS"
         else
           echo "No new commits, no PR."
         fi

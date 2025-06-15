@@ -16,7 +16,7 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 | poetry-version    | The Poetry version to use.                                         | `2.0.0`     | no         |
 | directory         | The directory of the project files.                                | `./`        | no         |
 | pr-title-prefix   | A prefix for the PR title.                                         | `""`        | no         |
-| pr-labels         | (TODO) Comma or newline separated list of labels for the PR.       | `""`        | no         |
+| pr-labels         | Comma or newline separated list of labels for the PR.              | `""`      | no         |
 | test-command      | A command to run tests after each update.                          | `""`        | no         |
 | github_token      | GitHub token for PR creation.                                      |             | **yes**    |
 
@@ -29,6 +29,6 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
     poetry-version: '2.0.0'
     directory: './'
     pr-title-prefix: '[Poetry Update] '
-    # pr-labels: 'dependencies,automerge' # TODO: not yet implemented
+    pr-labels: 'bug,needs review,high priority'
     test-command: 'pytest'
     github_token: ${{ secrets.GITHUB_TOKEN }}
