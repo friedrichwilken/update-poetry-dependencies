@@ -5,8 +5,8 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 ### Features
 
 1. Each updated package is committed separately.
-2. Optionally test each update with a custom command—only successful updates are committed.
-3. (TODO) Add labels to the created pull request.
+2. Optionally test each update with a custom command —only successful updates are committed.
+3. Add labels to the created pull request.
 
 ### Inputs
 
