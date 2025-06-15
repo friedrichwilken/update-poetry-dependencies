@@ -207,7 +207,7 @@ runs:
         BRANCH_NAME: update-packages-${{ github.run_id }}-${{ github.run_attempt }}
         GH_TOKEN: ${{ inputs.github_token }}
         PR_TITLE: ${{ inputs.pr-title-prefix }}Update and successfully test packages
-        LABELS: ${{ inputs.labels }}
+        LABELS: ${{ inputs.pr-labels }}
       run: |
         echo "::group::Creating PR"
 
