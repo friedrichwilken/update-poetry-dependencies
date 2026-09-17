@@ -1,6 +1,15 @@
 import json
 
-from updater.report import MAX_BODY_CHARS, render_body, report_json, write_outputs
+import pytest
+
+from updater.report import (
+    MAX_BODY_CHARS,
+    MAX_REPORT_JSON_BYTES,
+    MAX_SUMMARY_CHARS,
+    render_body,
+    report_json,
+    write_outputs,
+)
 from updater.updater import PackageOutcome, UpdateResult
 
 
@@ -264,3 +273,244 @@ def test_write_outputs_does_not_touch_summary_when_no_path_given(tmp_path):
 
     # must not raise even though no summary_path was given
     write_outputs(str(output_file), result, "body")
+
+
+# --- Table cell escaping -----------------------------------------------
+
+
+def test_render_body_escapes_pipe_in_package_name_and_version():
+    result = UpdateResult(
+        outcomes=[_outcome(name="evil|pkg", status="updated", old_version="1|0", new_version="2|0")]
+    )
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert "| evil\\|pkg | 1\\|0 | 2\\|0 |" in body
+    # the raw, unescaped pipes must not appear as if they were real table
+    # column separators
+    assert "| evil|pkg |" not in body
+
+
+def test_render_body_escapes_newline_in_package_name():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(name="evil\nname", status="updated", old_version="1.0", new_version="2.0")
+        ]
+    )
+
+    body = render_body(result, "https://example.com/run/1")
+
+    # a raw newline inside a cell would break the table row in two
+    assert "evil\nname" not in body
+    assert "evil name" in body
+
+
+def test_render_body_escapes_backticks_and_angle_brackets_in_version():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="pkg", status="updated", old_version="1.0`</details>", new_version="<b>2.0"
+            )
+        ]
+    )
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert "1.0`</details>" not in body
+    assert "<b>2.0" not in body
+    assert "&lt;b&gt;2.0" in body
+
+
+def test_render_body_escapes_pipe_in_failed_table_and_summary():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="a|b",
+                status="failed",
+                old_version="1.0",
+                new_version="1|1",
+                failure_kind="test",
+                output_tail="boom",
+            )
+        ]
+    )
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert "| a\\|b | 1.0 | 1\\|1 | tests failed |" in body
+    assert "<summary>a\\|b: output</summary>" in body
+
+
+# --- Table row capping at scale -----------------------------------------
+
+
+def test_render_body_caps_table_rows_and_notes_how_many_more():
+    outcomes = [
+        _outcome(
+            name=f"updated-package-{i:05d}",
+            status="updated",
+            old_version="1.0.0",
+            new_version="1.0.1",
+        )
+        for i in range(3000)
+    ]
+    result = UpdateResult(outcomes=outcomes)
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert len(body) <= MAX_BODY_CHARS
+    assert "more updated package(s)" in body
+
+
+@pytest.mark.parametrize("n", [0, 1, 50, 2000])
+def test_render_body_stays_within_budget_for_various_sizes(n):
+    outcomes = (
+        [
+            _outcome(name=f"upd-{i}", status="updated", old_version="1.0.0", new_version="1.0.1")
+            for i in range(n)
+        ]
+        + [
+            _outcome(
+                name=f"fail-{i}",
+                status="failed",
+                old_version="1.0.0",
+                new_version="1.0.1",
+                failure_kind="test",
+                output_tail="some test output\n" * 20,
+            )
+            for i in range(n)
+        ]
+        + [_outcome(name=f"skip-{i}", status="skipped") for i in range(n)]
+    )
+    result = UpdateResult(outcomes=outcomes)
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert len(body) <= MAX_BODY_CHARS
+
+
+def test_render_body_2000_of_each_status_stays_under_the_pr_body_budget():
+    """The size guarantee must hold for any input, not just the common
+    case of a handful of chatty test failures - this is the extreme case
+    named in review: 2000 failed + 2000 updated + 2000 skipped."""
+    outcomes = (
+        [
+            _outcome(name=f"upd-{i}", status="updated", old_version="1.0.0", new_version="1.0.1")
+            for i in range(2000)
+        ]
+        + [
+            _outcome(
+                name=f"fail-{i}",
+                status="failed",
+                old_version="1.0.0",
+                new_version="1.0.1",
+                failure_kind="test",
+                output_tail="boom\n" * 100,
+            )
+            for i in range(2000)
+        ]
+        + [_outcome(name=f"skip-{i}", status="skipped") for i in range(2000)]
+    )
+    result = UpdateResult(outcomes=outcomes)
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert len(body) <= MAX_BODY_CHARS
+
+
+def test_render_body_job_summary_budget_allows_a_much_larger_report():
+    """The job summary reuses the same renderer with a bigger budget, so
+    it can carry a fuller report than the PR body for the same result."""
+    outcomes = [
+        _outcome(
+            name=f"fail-{i}",
+            status="failed",
+            old_version="1.0.0",
+            new_version="1.0.1",
+            failure_kind="test",
+            output_tail="boom\n" * 50,
+        )
+        for i in range(200)
+    ]
+    result = UpdateResult(outcomes=outcomes)
+
+    pr_body = render_body(result, "https://example.com/run/1")
+    summary = render_body(result, "https://example.com/run/1", max_chars=MAX_SUMMARY_CHARS)
+
+    assert len(summary) <= MAX_SUMMARY_CHARS
+    assert len(summary) > len(pr_body)
+    # the PR body had to drop/omit some failures' output at this scale;
+    # the summary (much bigger budget) should not have needed to
+    assert "omitted" not in summary.lower()
+
+
+# --- Abort banner ---------------------------------------------------------
+
+
+def test_render_body_aborted_reason_is_shown_as_a_banner_at_the_top():
+    result = UpdateResult(outcomes=[_outcome(name="a", status="updated")])
+
+    body = render_body(result, "https://example.com/run/1", aborted_reason="re-sync failed after a")
+
+    assert body.index("Run aborted") < body.index("Workflow run:")
+    assert "re-sync failed after a" in body
+
+
+def test_render_body_aborted_with_no_outcomes_still_shows_the_banner():
+    body = render_body(UpdateResult(), "https://example.com/run/1", aborted_reason="boom")
+
+    assert "Run aborted" in body
+    assert "boom" in body
+
+
+# --- report_json size cap --------------------------------------------------
+
+
+def test_report_json_drops_output_tail_progressively_when_too_large():
+    big = "x" * (200 * 1024)
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="a",
+                status="failed",
+                failure_kind="test",
+                output_tail=big,
+            ),
+            _outcome(
+                name="b",
+                status="failed",
+                failure_kind="test",
+                output_tail=big,
+            ),
+            _outcome(name="c", status="updated", output_tail=""),
+        ]
+    )
+
+    text = report_json(result, max_bytes=256 * 1024)
+
+    assert len(text.encode("utf-8")) <= 256 * 1024
+    data = json.loads(text)
+    # every package still gets a record - the array itself is never
+    # truncated, only output_tail contents
+    assert [r["name"] for r in data] == ["a", "b", "c"]
+    truncated = [r for r in data if r.get("output_truncated")]
+    assert truncated, "expected at least one record to have its output_tail dropped"
+    for record in truncated:
+        assert record["output_tail"] == ""
+
+
+def test_report_json_leaves_small_output_untouched():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(name="a", status="failed", failure_kind="test", output_tail="small output")
+        ]
+    )
+
+    data = json.loads(report_json(result))
+
+    assert data[0]["output_tail"] == "small output"
+    assert "output_truncated" not in data[0]
+
+
+def test_report_json_default_budget_constant_is_documented_sane():
+    assert MAX_REPORT_JSON_BYTES == 256 * 1024

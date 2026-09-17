@@ -69,18 +69,23 @@ The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), incl
 
 ### Report
 
-The PR body / job summary reports, per package: for an update, the old and new locked version; for a failure, the current and attempted version, whether it was a dependency-resolution failure or a test failure, and a collapsed block with the tail of the relevant output (resolver output for a resolution failure, test command output for a test failure). Long output is truncated to keep the report well under GitHub's PR body size limit.
+The PR body / job summary reports, per package: for an update, the old and new locked version; for a failure, the current and attempted version, whether it was a dependency-resolution failure or a test failure, and a collapsed block with the tail of the relevant output (resolver output for a resolution failure, test command output for a test failure). Package names, versions and failure reasons are escaped so they can never break the report's table formatting or be interpreted as markup.
 
-`report-json` carries the same per-package data as a stable, machine-readable array, one object per top-level package:
+The report is rendered under an explicit character budget: well under GitHub's 65536 character PR body limit for `pr-body`, and a larger (but still bounded, ~900000 character) budget for the job summary, so the job summary can carry more detail than the PR body for the same run. At either size, table rows and per-package output blocks are dropped (with a "N more, see `report-json`/job summary" note) as needed to stay under the budget - the guarantee holds regardless of how many packages or how much output there is.
 
-| Field          | Type            | Description                                                                 |
-|----------------|-----------------|-------------------------------------------------------------------------------|
-| name           | string          | The top-level package name.                                                 |
-| status         | string          | One of `updated`, `failed`, `skipped`.                                      |
-| old_version    | string \| null  | The version locked before this run touched the package, or `null` if unknown. |
-| new_version    | string \| null  | For `updated`/`skipped`: the resulting locked version. For `failed`: the version that was attempted before the change was reverted. `null` if unknown. |
-| failure_kind   | string \| null  | `resolution` (the update/lock step itself failed), `test` (the test command failed), or `null` for a non-failure. |
-| output_tail    | string          | Tail of the relevant captured output for a failure (empty otherwise), ANSI escape codes stripped. |
+If the update loop has to abort early (currently only when re-syncing the environment after a discarded update itself fails), the report still covers everything processed before the abort - already-made commits for packages that passed stay made locally, but the run is not pushed and no PR is created/edited - and starts with a "Run aborted: `<reason>`" banner.
+
+`report-json` carries the same per-package data as a stable, machine-readable array, one object per top-level package. Its total size is capped independently (~256 KiB): if needed, `output_tail` is dropped (in favor of `output_truncated: true`) from the packages with the largest captured output first, until it fits - every package still gets a record.
+
+| Field             | Type            | Description                                                                 |
+|-------------------|-----------------|-------------------------------------------------------------------------------|
+| name              | string          | The top-level package name.                                                 |
+| status            | string          | One of `updated`, `failed`, `skipped`.                                      |
+| old_version       | string \| null  | The version locked before this run touched the package, or `null` if unknown. |
+| new_version       | string \| null  | For `updated`/`skipped`: the resulting locked version. For `failed`: the version that was attempted before the change was reverted. `null` if unknown. |
+| failure_kind      | string \| null  | `resolution` (the update/lock step itself failed), `test` (the test command failed), or `null` for a non-failure. |
+| output_tail       | string          | Tail of the relevant captured output for a failure (empty otherwise), ANSI escape codes stripped. |
+| output_truncated  | boolean         | Only present (`true`) when `output_tail` was dropped to keep `report-json` under its size cap; absent otherwise. |
 
 ### Token and permissions
 

@@ -7,10 +7,10 @@ from .backend import make_backend
 from .bootstrap import bootstrap
 from .config import Config, check_versions, parse_labels, resolve_base_branch
 from .detect import detect_package_manager
-from .errors import ActionError
+from .errors import ActionError, UpdateAborted
 from .git_repo import GitRepo
 from .github_pr import GithubPR, create_or_edit
-from .report import render_body, write_outputs
+from .report import MAX_SUMMARY_CHARS, render_body, write_outputs
 from .runner import CommandRunner
 from .updater import UpdateResult, run_updates
 
@@ -55,11 +55,36 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     git.configure_user(cfg.actor, f"{cfg.actor}@users.noreply.github.com")
     start_sha = git.head_sha()
 
-    result = run_updates(backend, git, runner, packages, cfg.test_command, cfg.directory)
-
     run_url = f"{cfg.server_url}/{cfg.repository}/actions/runs/{cfg.run_id}"
+
+    try:
+        result = run_updates(backend, git, runner, packages, cfg.test_command, cfg.directory)
+    except UpdateAborted as exc:
+        # Some packages were already processed (and, for passing ones,
+        # already committed) before the abort - report on that partial
+        # result instead of losing it, but never push/PR it: the run
+        # still failed, so re-raise once the report is written (the
+        # already-made commits stay local/uncommitted-to-remote, exactly
+        # like any other failure below the install step).
+        partial_body = render_body(exc.result, run_url, aborted_reason=str(exc))
+        partial_summary = render_body(
+            exc.result, run_url, max_chars=MAX_SUMMARY_CHARS, aborted_reason=str(exc)
+        )
+        write_outputs(
+            cfg.github_output,
+            exc.result,
+            partial_body,
+            cfg.github_step_summary,
+            summary_body=partial_summary,
+        )
+        print(partial_body)
+        raise
+
     body = render_body(result, run_url)
-    write_outputs(cfg.github_output, result, body, cfg.github_step_summary)
+    summary_body = render_body(result, run_url, max_chars=MAX_SUMMARY_CHARS)
+    write_outputs(
+        cfg.github_output, result, body, cfg.github_step_summary, summary_body=summary_body
+    )
     print(body)
 
     if cfg.dry_run:

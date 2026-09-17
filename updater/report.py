@@ -1,12 +1,15 @@
 """Renders the PR body / job summary report and the action's outputs from
 an `UpdateResult`.
 
-The body is built as independent sections (updated table, failed table +
-per-package `<details>` output blocks, skipped line) that are then joined
-under a total character budget (`MAX_BODY_CHARS`), comfortably below
-GitHub's 65536 character PR body limit, so a handful of very chatty test
-failures can never make the PR create/edit call fail outright - captured
-output is truncated (with a note saying so) rather than the whole report.
+The whole body is rendered under an explicit character budget
+(`max_chars`): each section (tables, skipped line, per-package failure
+`<details>` blocks) caps itself to a fair share of the remaining budget
+and adds a "N more - see report-json/job summary" note when it has to
+drop rows, and a final, unconditional truncation guard
+(`_hard_truncate`) enforces `len(body) <= max_chars` no matter what the
+section-level budgeting produced - so the guarantee holds for any input,
+not just the common case. The PR body and the job summary reuse the same
+renderer with different budgets (`MAX_BODY_CHARS`/`MAX_SUMMARY_CHARS`).
 """
 
 from __future__ import annotations
@@ -17,36 +20,40 @@ import secrets
 
 from .updater import PackageOutcome, UpdateResult
 
-# Comfortably below GitHub's 65536 character PR body limit, leaving
-# headroom for the fixed sections (tables, headings, run link) around the
-# budgeted <details> blocks.
+# Comfortably below GitHub's 65536 character PR body limit.
 MAX_BODY_CHARS = 60000
+
+# The job summary has a much larger (1 MiB) GitHub limit; keep comfortably
+# under it too, while still allowing a much fuller report than the PR body.
+MAX_SUMMARY_CHARS = 900_000
+
+# Cap on the serialized size of the report-json output. GITHUB_OUTPUT has
+# no hard documented limit as tight as the PR body's, but an unbounded
+# array of full captured-output tails could still make it enormous, so
+# output_tail is progressively dropped (see report_json()) to keep it
+# under this.
+MAX_REPORT_JSON_BYTES = 256 * 1024
 
 _REASON_LABELS = {"resolution": "resolution failed", "test": "tests failed"}
 
-
-def _v(version: str | None) -> str:
-    return version if version else "-"
+_SEE_FULL_LIST = "see `report-json` or the job summary for the full list"
 
 
-def _updated_table(outcomes: list[PackageOutcome]) -> str:
-    lines = ["| package | old | new |", "| --- | --- | --- |"]
-    for o in outcomes:
-        lines.append(f"| {o.name} | {_v(o.old_version)} | {_v(o.new_version)} |")
-    return "## ✅ Updated\n\n" + "\n".join(lines) + "\n"
-
-
-def _failed_table(outcomes: list[PackageOutcome]) -> str:
-    lines = ["| package | current | attempted | reason |", "| --- | --- | --- | --- |"]
-    for o in outcomes:
-        reason = _REASON_LABELS.get(o.failure_kind, o.failure_kind or "failed")
-        lines.append(f"| {o.name} | {_v(o.old_version)} | {_v(o.new_version)} | {reason} |")
-    return "## \U0001f6d1 Failed\n\n" + "\n".join(lines) + "\n"
-
-
-def _skipped_line(outcomes: list[PackageOutcome]) -> str:
-    names = ", ".join(o.name for o in outcomes)
-    return f"## ⏭ No update available\n\n{names}\n"
+def _cell(value: object) -> str:
+    """Renders a table cell (or similar inline markdown context) safely:
+    neutralizes `|` (the column separator), backticks, angle brackets and
+    embedded newlines, so a package name/version/reason coming out of a
+    lock file or captured output can never break the table structure or
+    be interpreted as markup/HTML. Falsy values render as "-"."""
+    if not value:
+        return "-"
+    text = str(value)
+    text = text.replace("\\", "\\\\")
+    text = text.replace("|", "\\|")
+    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    text = text.replace("`", "\\`")
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
+    return text
 
 
 def _fence_for(content: str) -> str:
@@ -64,20 +71,107 @@ def _neutralize_details(text: str) -> str:
     return re.sub(r"</details>", "<​/details>", text, flags=re.IGNORECASE)
 
 
+def _table_section(
+    heading: str, header_lines: list[str], rows: list[str], budget: int, noun: str
+) -> str:
+    """`heading` + `header_lines` + as many `rows` as fit within `budget`
+    characters, else a trailing "N more" note - by construction, this
+    never returns more than roughly `budget` characters (a small,
+    bounded overshoot is possible only from the note's own text, which is
+    reserved for up front)."""
+    prefix = f"{heading}\n\n"
+    header_text = "\n".join(header_lines)
+    note_reserve = 200  # generous upper bound for the "N more" note below
+
+    available = budget - len(prefix) - len(header_text) - 1 - note_reserve
+    fitted: list[str] = []
+    used = 0
+    if available > 0:
+        for row in rows:
+            row_cost = len(row) + 1
+            if used + row_cost > available:
+                break
+            fitted.append(row)
+            used += row_cost
+    omitted = len(rows) - len(fitted)
+
+    text = prefix + "\n".join(header_lines + fitted) + "\n"
+    if omitted:
+        text += f"\n_… and {omitted} more {noun}; {_SEE_FULL_LIST}._\n"
+    return text
+
+
+def _updated_table(outcomes: list[PackageOutcome], budget: int) -> str:
+    rows = [
+        f"| {_cell(o.name)} | {_cell(o.old_version)} | {_cell(o.new_version)} |" for o in outcomes
+    ]
+    return _table_section(
+        "## ✅ Updated",
+        ["| package | old | new |", "| --- | --- | --- |"],
+        rows,
+        budget,
+        "updated package(s)",
+    )
+
+
+def _failed_table(outcomes: list[PackageOutcome], budget: int) -> str:
+    rows = []
+    for o in outcomes:
+        reason = _REASON_LABELS.get(o.failure_kind, o.failure_kind or "failed")
+        rows.append(
+            f"| {_cell(o.name)} | {_cell(o.old_version)} | {_cell(o.new_version)} | "
+            f"{_cell(reason)} |"
+        )
+    return _table_section(
+        "## \U0001f6d1 Failed",
+        ["| package | current | attempted | reason |", "| --- | --- | --- | --- |"],
+        rows,
+        budget,
+        "failed package(s)",
+    )
+
+
+def _skipped_line(outcomes: list[PackageOutcome], budget: int) -> str:
+    heading = "## ⏭ No update available\n\n"
+    names = [_cell(o.name) for o in outcomes]
+    full = ", ".join(names)
+    if len(heading) + len(full) + 1 <= budget:
+        return heading + full + "\n"
+
+    note_reserve = 150
+    available = budget - len(heading) - note_reserve
+    fitted: list[str] = []
+    used = 0
+    if available > 0:
+        for name in names:
+            cost = len(name) + 2
+            if used + cost > available:
+                break
+            fitted.append(name)
+            used += cost
+    omitted = len(names) - len(fitted)
+
+    text = heading + ", ".join(fitted)
+    if omitted:
+        text += f", … and {omitted} more; {_SEE_FULL_LIST}."
+    return text + "\n"
+
+
 def _detail_block(outcome: PackageOutcome) -> str:
     content = _neutralize_details(outcome.output_tail) or "(no output captured)"
     fence = _fence_for(content)
+    name = _cell(outcome.name)
     return (
-        f"<details>\n<summary>{outcome.name}: output</summary>\n\n"
+        f"<details>\n<summary>{name}: output</summary>\n\n"
         f"{fence}\n{content}\n{fence}\n\n</details>\n"
     )
 
 
-def _omitted_note(names: list[str]) -> str:
+def _omitted_details_note(names: list[str]) -> str:
+    shown = ", ".join(_cell(n) for n in names)
     return (
         f"_Output for {len(names)} failed package(s) omitted to keep this report under "
-        f"GitHub's PR body size limit: {', '.join(names)}. See the workflow run for the "
-        "full output._"
+        f"the size limit: {shown}. {_SEE_FULL_LIST}._"
     )
 
 
@@ -88,7 +182,7 @@ def _budgeted_details(failed: list[PackageOutcome], budget: int) -> str:
     if not failed:
         return ""
     if budget <= 0:
-        return _omitted_note([o.name for o in failed])
+        return _omitted_details_note([o.name for o in failed])
 
     blocks: list[str] = []
     used = 0
@@ -103,63 +197,127 @@ def _budgeted_details(failed: list[PackageOutcome], budget: int) -> str:
 
     text = "\n".join(blocks)
     if omitted:
-        note = _omitted_note(omitted)
+        note = _omitted_details_note(omitted)
         text = f"{text}\n\n{note}" if text else note
     return text
 
 
-def render_body(result: UpdateResult, run_url: str) -> str:
+def _hard_truncate(body: str, max_chars: int) -> str:
+    """Unconditional final guard: whatever the section-level budgeting
+    above produced, `len(result) <= max_chars` always holds afterwards -
+    this is what makes the size guarantee true for any input, not just
+    the cases the section budgeting above was designed for."""
+    if len(body) <= max_chars:
+        return body
+    note = "\n\n_⚠️ Report truncated to fit the size limit._\n"
+    keep = max(max_chars - len(note), 0)
+    return body[:keep] + note[: max_chars - keep]
+
+
+def render_body(
+    result: UpdateResult,
+    run_url: str,
+    max_chars: int = MAX_BODY_CHARS,
+    aborted_reason: str | None = None,
+) -> str:
     updated = [o for o in result.outcomes if o.status == "updated"]
     failed = [o for o in result.outcomes if o.status == "failed"]
     skipped = [o for o in result.outcomes if o.status == "skipped"]
 
-    parts = [f"Workflow run: {run_url}"]
+    banner = f"⚠️ **Run aborted:** {aborted_reason}\n\n" if aborted_reason else ""
+    header = f"{banner}Workflow run: {run_url}"
 
     if not updated and not failed and not skipped:
-        parts.append("No packages were updated - nothing changed in this run.")
-        return "\n\n".join(parts) + "\n"
+        body = f"{header}\n\nNo packages were updated - nothing changed in this run.\n"
+        return _hard_truncate(body, max_chars)
 
+    remaining = max(max_chars - len(header) - 2, 0)
+
+    parts = [header]
     if updated:
-        parts.append(_updated_table(updated))
+        section = _updated_table(updated, remaining)
+        parts.append(section)
+        remaining = max(remaining - len(section) - 2, 0)
     if failed:
-        parts.append(_failed_table(failed))
+        section = _failed_table(failed, remaining)
+        parts.append(section)
+        remaining = max(remaining - len(section) - 2, 0)
     if skipped:
-        parts.append(_skipped_line(skipped))
+        section = _skipped_line(skipped, remaining)
+        parts.append(section)
+        remaining = max(remaining - len(section) - 2, 0)
 
     body = "\n\n".join(parts) + "\n"
 
     if failed:
-        budget = MAX_BODY_CHARS - len(body)
+        budget = max_chars - len(body)
         details = _budgeted_details(failed, budget)
         if details:
             body += "\n" + details
 
-    return body
+    return _hard_truncate(body, max_chars)
 
 
-def _outcome_to_dict(o: PackageOutcome) -> dict:
-    return {
+def _outcome_to_dict(o: PackageOutcome, drop_output: bool = False) -> dict:
+    record = {
         "name": o.name,
         "status": o.status,
         "old_version": o.old_version,
         "new_version": o.new_version,
         "failure_kind": o.failure_kind,
-        "output_tail": o.output_tail,
+        "output_tail": "" if drop_output else o.output_tail,
     }
+    if drop_output and o.output_tail:
+        record["output_truncated"] = True
+    return record
 
 
-def report_json(result: UpdateResult) -> str:
+def report_json(result: UpdateResult, max_bytes: int = MAX_REPORT_JSON_BYTES) -> str:
     """A single-line JSON array of per-package records, one per
     `PackageOutcome` (field names: name, status, old_version, new_version,
-    failure_kind, output_tail) - see the README Outputs table for the
+    failure_kind, output_tail, and output_truncated when output_tail was
+    dropped to fit the size budget) - see the README Outputs table for the
     field documentation. `json.dumps` escapes embedded newlines/control
     characters within strings, so this never contains a literal newline
-    and is safe to write as a plain `key=value` GITHUB_OUTPUT line."""
-    return json.dumps([_outcome_to_dict(o) for o in result.outcomes])
+    and is safe to write as a plain `key=value` GITHUB_OUTPUT line.
+
+    Every package always gets a record - if the serialized array would
+    exceed `max_bytes`, output_tail (the only field that can be large) is
+    dropped, largest first, from as many records as it takes to fit,
+    rather than truncating the array itself.
+    """
+    records = [_outcome_to_dict(o) for o in result.outcomes]
+    text = json.dumps(records)
+    if len(text.encode("utf-8")) <= max_bytes or not result.outcomes:
+        return text
+
+    by_output_size = sorted(
+        range(len(result.outcomes)),
+        key=lambda i: len(result.outcomes[i].output_tail),
+        reverse=True,
+    )
+    dropped: set[int] = set()
+    for i in by_output_size:
+        if not result.outcomes[i].output_tail:
+            break  # remaining outcomes have no output_tail left to drop
+        dropped.add(i)
+        records = [
+            _outcome_to_dict(o, drop_output=(idx in dropped))
+            for idx, o in enumerate(result.outcomes)
+        ]
+        text = json.dumps(records)
+        if len(text.encode("utf-8")) <= max_bytes:
+            break
+
+    return text
 
 
 def write_outputs(
-    output_path: str, result: UpdateResult, body: str, summary_path: str = ""
+    output_path: str,
+    result: UpdateResult,
+    body: str,
+    summary_path: str = "",
+    summary_body: str | None = None,
 ) -> None:
     if output_path:
         with open(output_path, "a", encoding="utf-8") as fh:
@@ -172,5 +330,5 @@ def write_outputs(
 
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as fh:
-            fh.write(body)
+            fh.write(summary_body if summary_body is not None else body)
             fh.write("\n")
