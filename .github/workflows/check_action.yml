@@ -3,6 +3,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   actionlint:
     runs-on: ubuntu-latest
@@ -47,6 +50,7 @@ jobs:
         run: uv run ruff format --check .
 
   e2e:
+    name: e2e (${{ matrix.package_manager }})
     strategy:
       fail-fast: false
       matrix:
@@ -108,17 +112,22 @@ jobs:
 
       - name: Verify the fixture environment is healthy after the run
         working-directory: ${{ matrix.directory }}
-        run: ${{ matrix.test_command }}
+        env:
+          TEST_COMMAND: ${{ matrix.test_command }}
+        run: $TEST_COMMAND
 
       - name: Verify the project venv really runs the requested python-version
         working-directory: ${{ matrix.directory }}
+        env:
+          VENV_PYTHON_COMMAND: ${{ matrix.venv_python_command }}
+          PYTHON_VERSION: ${{ matrix.python_version }}
         run: |
-          actual="$(${{ matrix.venv_python_command }})"
+          actual="$($VENV_PYTHON_COMMAND)"
           echo "project venv reports: $actual"
           case "$actual" in
-            "Python ${{ matrix.python_version }}"*) ;;
+            "Python $PYTHON_VERSION"*) ;;
             *)
-              echo "expected project venv python to start with 'Python ${{ matrix.python_version }}', got '$actual'"
+              echo "expected project venv python to start with 'Python $PYTHON_VERSION', got '$actual'"
               exit 1
               ;;
           esac
