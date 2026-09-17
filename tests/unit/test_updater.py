@@ -2,6 +2,7 @@ import pytest
 from fakes import FakeBackend, FakeGit, FakeRunner, result
 
 from updater.errors import ActionError, UpdateAborted
+from updater.major import MajorAttempt
 from updater.updater import run_updates
 
 
@@ -224,3 +225,242 @@ def test_locked_version_is_read_before_and_after_the_update_attempt():
     run_updates(backend, git, runner, ["a"], "", "dir")
 
     assert backend.locked_version_calls == ["a", "a"]
+
+
+# --- allow_major state machine (issue #21) ------------------------------
+
+
+def test_default_off_byte_compat_never_touches_major_machinery():
+    """With allow_major left at its default (False), try_major() and
+    major_files_to_stage() must never even be called - the manifest is
+    never read or touched at all."""
+    backend = FakeBackend(update_ok={"a": True}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir")
+
+    assert res.passed == ["a"]
+    assert backend.try_major_calls == []
+    assert backend.major_files_to_stage_calls == 0
+    outcome = res.outcomes[0]
+    assert outcome.bump is None
+    assert outcome.major_attempted_version is None
+    assert outcome.major_skip_reason is None
+
+
+def test_major_attempt_passes_and_is_committed_without_an_in_range_update():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "3.0.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit(diff_results=[])  # never consulted: no in-range update runs
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir", allow_major=True)
+
+    assert res.passed == ["a"]
+    assert backend.updated_packages == []  # the plain in-range path never ran
+    assert git.commit_messages == ["Update a 1.0.0 -> 3.0.0 (major)"]
+    assert git.staged_calls == [["pyproject.toml", "poetry.lock"]]
+
+    outcome = res.outcomes[0]
+    assert outcome.status == "updated"
+    assert outcome.bump == "major"
+    assert outcome.old_version == "1.0.0"
+    assert outcome.new_version == "3.0.0"
+    assert outcome.major_attempted_version is None
+    assert outcome.major_skip_reason is None
+
+
+def test_major_attempt_runs_test_command_before_committing():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "3.0.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit()
+    runner = FakeRunner(shell_results=[result(True)])
+
+    res = run_updates(backend, git, runner, ["a"], "pytest", "dir", allow_major=True)
+
+    assert runner.shell_calls == [("pytest", "dir")]
+    assert res.outcomes[0].bump == "major"
+
+
+def test_major_resolution_failure_falls_back_to_in_range_update_and_reports_held_back():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "1.5.0", "1.1.0"]},
+        major_attempts={
+            "a": MajorAttempt(resolve_result=result(False, stderr="could not resolve pkg>=3"))
+        },
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir", allow_major=True)
+
+    # major files were reset+resynced once, before the in-range update ran
+    assert git.reset_calls == [["pyproject.toml", "poetry.lock"]]
+    assert backend.sync_calls == 1
+    # the in-range update then ran normally and passed
+    assert res.passed == ["a"]
+    assert git.staged_calls == [["poetry.lock"]]
+
+    outcome = res.outcomes[0]
+    assert outcome.status == "updated"
+    assert outcome.bump is None
+    assert outcome.major_attempted_version == "1.5.0"
+    assert outcome.major_failure_kind == "resolution"
+    assert "could not resolve pkg>=3" in outcome.major_output_tail
+    assert outcome.old_version == "1.0.0"
+    assert outcome.new_version == "1.1.0"
+
+
+def test_major_test_failure_falls_back_to_in_range_update_and_reports_held_back():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "3.0.0", "1.1.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit(diff_results=[True])
+    # first run_shell call (for the major attempt) fails; second (in-range) passes
+    runner = FakeRunner(shell_results=[result(False, stderr="tests failed hard"), result(True)])
+
+    res = run_updates(backend, git, runner, ["a"], "pytest", "dir", allow_major=True)
+
+    assert git.reset_calls == [["pyproject.toml", "poetry.lock"]]
+    assert res.passed == ["a"]
+
+    outcome = res.outcomes[0]
+    assert outcome.bump is None
+    assert outcome.major_attempted_version == "3.0.0"
+    assert outcome.major_failure_kind == "test"
+    assert "tests failed hard" in outcome.major_output_tail
+    assert outcome.new_version == "1.1.0"
+
+
+def test_major_and_in_range_both_fail_reports_failed_with_held_back_info():
+    backend = FakeBackend(
+        update_ok={"a": False},
+        versions={"a": ["1.0.0", "3.0.0", "1.0.0", "1.0.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner(shell_results=[result(False, stderr="major test failed")])
+
+    res = run_updates(backend, git, runner, ["a"], "pytest", "dir", allow_major=True)
+
+    assert res.failed == ["a"]
+    outcome = res.outcomes[0]
+    assert outcome.status == "failed"
+    assert outcome.failure_kind == "resolution"  # the in-range update's own failure
+    assert outcome.major_attempted_version == "3.0.0"
+    assert outcome.major_failure_kind == "test"
+    # both resets happened: once for the held-back major, once for the
+    # in-range resolution failure
+    assert git.reset_calls == [["pyproject.toml", "poetry.lock"], ["poetry.lock"]]
+
+
+def test_major_fails_and_nothing_in_range_is_still_reported_as_skipped_with_held_back():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "3.0.0", "1.0.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit(diff_results=[False])  # in-range update has nothing to do
+    runner = FakeRunner(shell_results=[result(False, stderr="major test failed")])
+
+    res = run_updates(backend, git, runner, ["a"], "pytest", "dir", allow_major=True)
+
+    assert res.skipped == ["a"]
+    outcome = res.outcomes[0]
+    assert outcome.status == "skipped"
+    assert outcome.major_attempted_version == "3.0.0"
+    assert outcome.major_failure_kind == "test"
+
+
+def test_major_skip_reason_is_recorded_and_in_range_update_still_runs():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "1.1.0"]},
+        major_attempts={"a": MajorAttempt(skip_reason="exact version pin")},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir", allow_major=True)
+
+    assert res.passed == ["a"]
+    outcome = res.outcomes[0]
+    assert outcome.major_skip_reason == "exact version pin"
+    assert outcome.major_attempted_version is None
+    assert outcome.bump is None
+
+
+def test_major_not_needed_returns_none_and_behaves_like_default_off():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "1.1.0"]},
+        major_attempts={"a": None},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir", allow_major=True)
+
+    assert backend.try_major_calls == ["a"]
+    outcome = res.outcomes[0]
+    assert outcome.status == "updated"
+    assert outcome.bump is None
+    assert outcome.major_skip_reason is None
+
+
+def test_major_reset_resync_failure_aborts_with_partial_results():
+    backend = FakeBackend(
+        update_ok={"a": True, "b": True},
+        sync_ok=False,
+        versions={"a": ["1.0.0", "1.1.0"]},
+        major_attempts={"b": MajorAttempt(resolve_result=result(False, stderr="boom"))},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "", "dir", allow_major=True)
+
+    partial = excinfo.value.result
+    # a completed and was committed normally before b's major attempt
+    # blew up the environment
+    assert [(o.name, o.status) for o in partial.outcomes] == [("a", "updated")]
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.0"]
+
+
+def test_major_reset_restores_both_manifest_and_lock():
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "1.0.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(False, stderr="boom"))},
+    )
+    git = FakeGit(diff_results=[False])
+    runner = FakeRunner()
+
+    run_updates(backend, git, runner, ["a"], "", "dir", allow_major=True)
+
+    assert git.reset_calls == [["pyproject.toml", "poetry.lock"]]
+
+
+def test_major_commit_stages_manifest_and_lock_but_in_range_stages_lock_only():
+    backend = FakeBackend(
+        update_ok={"a": True, "b": True},
+        versions={"a": ["1.0.0", "2.0.0"], "b": ["1.0.0", "1.1.0"]},
+        major_attempts={"a": MajorAttempt(resolve_result=result(True))},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    run_updates(backend, git, runner, ["a", "b"], "", "dir", allow_major=True)
+
+    assert git.staged_calls == [["pyproject.toml", "poetry.lock"], ["poetry.lock"]]

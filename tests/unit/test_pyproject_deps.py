@@ -1,6 +1,12 @@
 import pytest
 
-from updater.pyproject_deps import has_uv_conflicts, list_top_level_dependency_names, normalize_name
+from updater.pyproject_deps import (
+    find_pep_declaration,
+    has_uv_conflicts,
+    list_top_level_dependency_names,
+    normalize_name,
+    parse_requirement,
+)
 
 
 def write(tmp_path, text):
@@ -216,3 +222,113 @@ def test_has_uv_conflicts_true_when_declared(tmp_path):
         """,
     )
     assert has_uv_conflicts(path) is True
+
+
+# --- parse_requirement --------------------------------------------------
+
+
+def test_parse_requirement_plain():
+    parsed = parse_requirement("idna")
+    assert parsed.name == "idna"
+    assert parsed.extras == ()
+    assert parsed.specifier_text == ""
+    assert parsed.marker is None
+    assert parsed.is_direct_reference is False
+
+
+def test_parse_requirement_with_extras_and_specifier():
+    parsed = parse_requirement("requests[socks,security]>=2.28.0,<3.0")
+    assert parsed.name == "requests"
+    assert parsed.extras == ("socks", "security")
+    assert parsed.specifier_text == ">=2.28.0,<3.0"
+
+
+def test_parse_requirement_with_parenthesized_specifier():
+    """Poetry's own PEP 621 `[project.dependencies]` writes the specifier
+    wrapped in parens, e.g. `idna (>=3.4,<4.0)`."""
+    parsed = parse_requirement("idna (>=3.4,<4.0)")
+    assert parsed.name == "idna"
+    assert parsed.specifier_text == ">=3.4,<4.0"
+
+
+def test_parse_requirement_with_marker():
+    parsed = parse_requirement("black>=24; python_version >= '3.9'")
+    assert parsed.name == "black"
+    assert parsed.specifier_text == ">=24"
+    assert parsed.marker == "python_version >= '3.9'"
+
+
+def test_parse_requirement_direct_reference():
+    parsed = parse_requirement("mypkg @ https://example.com/mypkg-1.0-py3-none-any.whl")
+    assert parsed.name == "mypkg"
+    assert parsed.is_direct_reference is True
+    assert parsed.specifier_text == ""
+
+
+def test_parse_requirement_empty_is_none():
+    assert parse_requirement("") is None
+    assert parse_requirement("   ") is None
+
+
+# --- find_pep_declaration ------------------------------------------------
+
+
+def test_find_pep_declaration_in_main_dependencies():
+    data = {"project": {"dependencies": ["idna>=3.4,<4.0", "six>=1.15.0,<2.0"]}}
+    decl = find_pep_declaration(data, "six")
+    assert decl.table == "dependencies"
+    assert decl.group is None
+    assert decl.index == 1
+    assert decl.parsed.specifier_text == ">=1.15.0,<2.0"
+
+
+def test_find_pep_declaration_in_optional_dependencies():
+    data = {
+        "project": {
+            "dependencies": [],
+            "optional-dependencies": {"http": ["requests[socks]>=2.28.0,<3.0"]},
+        }
+    }
+    decl = find_pep_declaration(data, "requests")
+    assert decl.table == "optional-dependencies"
+    assert decl.group == "http"
+    assert decl.parsed.extras == ("socks",)
+
+
+def test_find_pep_declaration_in_dependency_groups():
+    data = {"project": {"dependencies": []}, "dependency-groups": {"dev": ["pytest>=7,<8"]}}
+    decl = find_pep_declaration(data, "pytest")
+    assert decl.table == "dependency-groups"
+    assert decl.group == "dev"
+
+
+def test_find_pep_declaration_skips_include_group_entries():
+    data = {
+        "project": {"dependencies": []},
+        "dependency-groups": {"dev": [{"include-group": "test"}, "mypy>=1.0"]},
+    }
+    decl = find_pep_declaration(data, "mypy")
+    assert decl.table == "dependency-groups"
+    assert decl.group == "dev"
+
+
+def test_find_pep_declaration_in_legacy_tool_uv_dev_dependencies():
+    data = {
+        "project": {"dependencies": []},
+        "tool": {"uv": {"dev-dependencies": ["pytest>=7,<8"]}},
+    }
+    decl = find_pep_declaration(data, "pytest")
+    assert decl.table == "tool.uv.dev-dependencies"
+    assert decl.group is None
+
+
+def test_find_pep_declaration_normalizes_name():
+    data = {"project": {"dependencies": ["My_Package>=1.0,<2.0"]}}
+    decl = find_pep_declaration(data, "my-package")
+    assert decl is not None
+    assert decl.parsed.name == "My_Package"
+
+
+def test_find_pep_declaration_returns_none_when_absent():
+    data = {"project": {"dependencies": ["idna>=3.4,<4.0"]}}
+    assert find_pep_declaration(data, "nonexistent") is None

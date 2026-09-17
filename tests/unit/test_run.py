@@ -20,6 +20,7 @@ def make_cfg(**overrides):
         base_branch="",
         github_base_ref="",
         dry_run=False,
+        allow_major=False,
         actor="actor",
         server_url="https://github.com",
         repository="owner/repo",

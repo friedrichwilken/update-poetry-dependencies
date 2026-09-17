@@ -14,10 +14,17 @@ from __future__ import annotations
 
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 _NAME_RE = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 _SOURCE_KEYS = {"git", "path", "url", "workspace"}
+
+# name, then an optional bracketed extras list, then whatever is left
+# (specifier text, possibly parenthesized, or a direct "@ ..." reference).
+_NAME_EXTRAS_RE = re.compile(
+    r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[\s*([^\]]*)\s*\])?\s*(.*)$"
+)
 
 
 def normalize_name(name: str) -> str:
@@ -40,12 +47,119 @@ def _requirement_name(requirement: str) -> str | None:
     return normalize_name(match.group(1))
 
 
-def _is_vcs_path_or_workspace_source(sources: dict, name: str) -> bool:
+def is_vcs_path_or_workspace_source(sources: dict, name: str) -> bool:
     entry = sources.get(name)
     if entry is None:
         return False
     entries = entry if isinstance(entry, list) else [entry]
     return any(isinstance(e, dict) and _SOURCE_KEYS & e.keys() for e in entries)
+
+
+@dataclass(frozen=True)
+class ParsedRequirement:
+    """A PEP 508 requirement string, broken into the pieces the major-bump
+    feature needs. `specifier_text` is the raw specifier set (whatever
+    comes after the name/extras and before an environment marker), with a
+    single pair of enclosing parentheses stripped if present (PEP 508
+    allows `name (>=1,<2)` as well as `name>=1,<2`; Poetry's own
+    `[project.dependencies]` output uses the parenthesized form)."""
+
+    name: str
+    extras: tuple[str, ...]
+    specifier_text: str
+    marker: str | None
+    is_direct_reference: bool  # "name @ <url>" - cannot be version-bumped
+
+
+def parse_requirement(requirement: str) -> ParsedRequirement | None:
+    text = (requirement or "").strip()
+    if not text:
+        return None
+
+    marker: str | None = None
+    if ";" in text:
+        text, marker = text.split(";", 1)
+        text = text.strip()
+        marker = marker.strip() or None
+
+    match = _NAME_EXTRAS_RE.match(text)
+    if not match:
+        return None
+    name = match.group(1)
+    extras_raw = match.group(3) or ""
+    extras = tuple(e.strip() for e in extras_raw.split(",") if e.strip())
+    rest = match.group(4).strip()
+
+    is_direct_reference = rest.startswith("@")
+    specifier_text = ""
+    if rest and not is_direct_reference:
+        if rest.startswith("(") and rest.endswith(")"):
+            rest = rest[1:-1].strip()
+        specifier_text = rest
+
+    return ParsedRequirement(
+        name=name,
+        extras=extras,
+        specifier_text=specifier_text,
+        marker=marker,
+        is_direct_reference=is_direct_reference,
+    )
+
+
+@dataclass(frozen=True)
+class PepDeclaration:
+    """Where a package is declared in a PEP 621 (`[project.dependencies]`
+    etc.) or PEP 735 (`[dependency-groups]`) table, or the legacy
+    `[tool.uv.dev-dependencies]` list - the shape shared by uv's own
+    dependencies and Poetry >= 2's PEP 621 tables."""
+
+    # "dependencies" | "optional-dependencies" | "dependency-groups" | "tool.uv.dev-dependencies"
+    table: str
+    group: str | None  # extra/group name, None for the plain "dependencies" table
+    index: int
+    raw: str
+    parsed: ParsedRequirement
+
+
+def find_pep_declaration(data: dict, package: str) -> PepDeclaration | None:
+    """Locate `package` (matched PEP 503 normalized) in any PEP
+    621/735-style dependency table of an already-parsed `pyproject.toml`.
+    Returns the first match; a `pyproject.toml` declaring the same
+    top-level package in more than one of these tables at once is not a
+    shape this action needs to handle specially."""
+    target = normalize_name(package)
+
+    def _scan(entries: list, table: str, group: str | None) -> PepDeclaration | None:
+        for index, entry in enumerate(entries or []):
+            if not isinstance(entry, str):
+                continue  # e.g. a dependency-groups {"include-group": ...} entry
+            parsed = parse_requirement(entry)
+            if parsed and normalize_name(parsed.name) == target:
+                return PepDeclaration(table, group, index, entry, parsed)
+        return None
+
+    project = data.get("project") or {}
+
+    found = _scan(project.get("dependencies") or [], "dependencies", None)
+    if found:
+        return found
+
+    for extra, entries in (project.get("optional-dependencies") or {}).items():
+        found = _scan(entries, "optional-dependencies", extra)
+        if found:
+            return found
+
+    for group, entries in (data.get("dependency-groups") or {}).items():
+        found = _scan(entries, "dependency-groups", group)
+        if found:
+            return found
+
+    tool_uv = (data.get("tool") or {}).get("uv") or {}
+    found = _scan(tool_uv.get("dev-dependencies") or [], "tool.uv.dev-dependencies", None)
+    if found:
+        return found
+
+    return None
 
 
 def has_uv_conflicts(pyproject_path: Path) -> bool:
@@ -95,7 +209,7 @@ def list_top_level_dependency_names(pyproject_path: Path) -> list[str]:
         name = _requirement_name(requirement)
         if name is None:
             continue
-        if _is_vcs_path_or_workspace_source(sources, name):
+        if is_vcs_path_or_workspace_source(sources, name):
             continue
         names.add(name)
 

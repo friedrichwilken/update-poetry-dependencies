@@ -85,6 +85,7 @@ class Config:
     base_branch: str
     github_base_ref: str
     dry_run: bool
+    allow_major: bool
     actor: str
     server_url: str
     repository: str
@@ -112,6 +113,7 @@ class Config:
             base_branch=get("BASE_BRANCH"),
             github_base_ref=get("GITHUB_BASE_REF", ""),
             dry_run=parse_bool(get("DRY_RUN", "false")),
+            allow_major=parse_bool(get("ALLOW_MAJOR", "false")),
             actor=get("GITHUB_ACTOR", "github-actions[bot]"),
             server_url=get("GITHUB_SERVER_URL", "https://github.com"),
             repository=get("GITHUB_REPOSITORY", ""),

@@ -58,7 +58,15 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     run_url = f"{cfg.server_url}/{cfg.repository}/actions/runs/{cfg.run_id}"
 
     try:
-        result = run_updates(backend, git, runner, packages, cfg.test_command, cfg.directory)
+        result = run_updates(
+            backend,
+            git,
+            runner,
+            packages,
+            cfg.test_command,
+            cfg.directory,
+            allow_major=cfg.allow_major,
+        )
     except UpdateAborted as exc:
         # Some packages were already processed (and, for passing ones,
         # already committed) before the abort - report on that partial
@@ -68,7 +76,11 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
         # like any other failure below the install step).
         partial_body = render_body(exc.result, run_url, aborted_reason=str(exc))
         partial_summary = render_body(
-            exc.result, run_url, max_chars=MAX_SUMMARY_CHARS, aborted_reason=str(exc)
+            exc.result,
+            run_url,
+            max_chars=MAX_SUMMARY_CHARS,
+            aborted_reason=str(exc),
+            include_major_skip_notes=True,
         )
         write_outputs(
             cfg.github_output,
@@ -81,7 +93,9 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
         raise
 
     body = render_body(result, run_url)
-    summary_body = render_body(result, run_url, max_chars=MAX_SUMMARY_CHARS)
+    summary_body = render_body(
+        result, run_url, max_chars=MAX_SUMMARY_CHARS, include_major_skip_notes=True
+    )
     write_outputs(
         cfg.github_output, result, body, cfg.github_step_summary, summary_body=summary_body
     )

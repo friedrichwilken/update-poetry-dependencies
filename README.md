@@ -53,6 +53,7 @@ Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv
 | branch-name       | Fixed branch name used for the update PR. Force-pushed on every run.                            | `deps/test-gated-updates`       | no       |
 | base-branch       | Base branch for the PR. If the checkout is detached (e.g. `pull_request` events), falls back to `GITHUB_BASE_REF`; if neither is available the action fails fast, before doing any work. | the currently checked out branch | no |
 | dry-run           | Run the full update loop but skip pushing the branch and creating/updating the PR.               | `false`                         | no       |
+| allow-major       | Opt-in: also attempt a major bump (raising the declared constraint) for a package whose constraint would otherwise exclude its latest release, falling back to the plain in-range update if that attempt fails. See "Major bump attempts" below. | `false` | no |
 | github_token      | GitHub token for PR creation.                                                                   |                                  | **yes**  |
 
 ### Outputs
@@ -62,6 +63,7 @@ Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv
 | passed-packages   | Comma separated list of packages that were updated and passed the test command. |
 | failed-packages   | Comma separated list of packages whose update or test failed and were discarded. |
 | skipped-packages  | Comma separated list of packages that had nothing to update.                |
+| held-back-packages | Comma separated list of packages where a major bump was attempted (`allow-major`) but held back; see "Major bump attempts" below. |
 | pr-body           | The rendered report / PR body.                                              |
 | report-json       | JSON array of per-package records; see "Report" below for the field reference. |
 
@@ -86,6 +88,35 @@ If the update loop has to abort early (currently only when re-syncing the enviro
 | failure_kind      | string \| null  | `resolution` (the update/lock step itself failed), `test` (the test command failed), or `null` for a non-failure. |
 | output_tail       | string          | Tail of the relevant captured output for a failure (empty otherwise), ANSI escape codes stripped. |
 | output_truncated  | boolean         | Only present (`true`) when `output_tail` was dropped to keep `report-json` under its size cap; absent otherwise. |
+| bump              | string          | Only present (`"major"`) when this outcome's own update is a major bump made by `allow-major`; absent for an in-range update. |
+| major_attempted_version | string \| null | Only present when a major bump was attempted for this package but held back (see "Major bump attempts" below): the version the attempt tried. |
+| major_failure_kind | string \| null | Only present alongside `major_attempted_version`: `resolution` or `test`, same meaning as `failure_kind` but for the held-back major attempt. |
+| major_output_tail | string          | Only present alongside `major_attempted_version`: tail of the held-back attempt's captured output. |
+| major_output_truncated | boolean    | Only present (`true`) when `output_tail`/`major_output_tail` were dropped together to keep `report-json` under its size cap. |
+| major_skip_reason | string          | Only present when `allow-major` is enabled but no major attempt could be made for this package at all (e.g. a git/path dependency, an exact pin, an environment marker, or an unparsable constraint). |
+
+### Major bump attempts
+
+`allow-major` (default `false`) is an opt-in, per-package extension of the same test-gated flow: for a package whose *declared constraint* has an effective upper bound (a caret/tilde/wildcard Poetry constraint, or a PEP 508 specifier with `<`/`<=`/`~=`/`==x.*`), it is not enough to know the latest release exists - the ordinary in-range update never looks past that bound. When one is found, before the plain in-range update:
+
+1. **Major attempt:** raise the declared constraint so the latest release is allowed (`poetry add "pkg[extras]@latest" --group <g>` / `--optional <extra>`, or for uv, rewrite just that requirement's specifier and re-lock with `uv add "pkg[extras]>=<bound>" --upgrade-package pkg`), then test exactly like an in-range update. If it passes, both `pyproject.toml` and the lock file are committed together (`Update <pkg> <old> -> <new> (major)`), and the package is done - no separate in-range update runs for it.
+2. **Fallback:** if raising the constraint fails to resolve, or resolves but fails the test command, every touched file (manifest *and* lock) is reset and the environment re-synced, and the plain in-range update (today's behavior) runs instead. Whichever outcome that produces - updated, failed, or "no update available" - also records the held-back major attempt (`major_attempted_version`/`major_failure_kind`/`major_output_tail` in `report-json`; a `held-back-packages` output entry either way).
+3. If the in-range update fails too, the package is `failed` exactly as it would be without `allow-major` - the held-back major attempt's details are kept alongside it.
+
+A package whose constraint has no effective upper bound needs no separate attempt at all - the in-range update already reaches the latest release - and is never double-tested.
+
+Not every declaration shape can be safely rewritten without risking silently dropping information (an extra, a marker, an environment-specific source, ...). These are always skipped rather than guessed at, and reported via `major_skip_reason` (plus a compact line in the job summary - not the PR body, to keep it free of noise) rather than silently ignored:
+
+- a git/path/url/workspace dependency, or a direct URL reference (`pkg @ ...`)
+- more than one constraint entry for the package (e.g. per-Python-version marker-scoped table entries)
+- a dependency carrying `markers`/`python`/`platform`/`source`/`allow-prereleases` keys this feature cannot faithfully preserve
+- an exact version pin (`==1.2.3`, or Poetry's bare `1.2.3`) - pinned on purpose, never touched
+- a constraint/specifier this action's PEP 440-ish parser cannot parse
+- `python` itself
+
+After a major attempt succeeds, the manifest is re-read and diffed against the original declaration; if anything other than the version constraint changed (extras dropped, moved to a different table, a marker appeared, ...), the change is discarded and treated as a failed attempt rather than kept - this action never keeps a change it cannot fully account for.
+
+The PR body gets a new "⚠️ Major update held back" table (package, current, attempted, reason) with the same collapsed per-package output blocks as the "Failed" section, and the "✅ Updated" table gains a `bump` column once at least one package in the run used it. All of this is additive: with `allow-major` left at its default `false`, the rendered report and `report-json` are byte-identical to before this feature existed.
 
 ### Token and permissions
 

@@ -10,12 +10,36 @@ driving.
 from __future__ import annotations
 
 import shlex
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from .constraints import (
+    pep508_has_upper_bound,
+    pep508_is_exact_pin,
+    pep508_parse_specifiers,
+    pep508_strip_upper_bound,
+    poetry_has_upper_bound,
+    poetry_is_exact_pin,
+    poetry_parse_constraint,
+)
 from .errors import ActionError
 from .lockfile import locked_version as _locked_version
-from .pyproject_deps import has_uv_conflicts, list_top_level_dependency_names
+from .major import MajorAttempt
+from .poetry_manifest import (
+    constraint_text,
+    extras_of,
+    find_poetry_table_declaration,
+    normalized_extra_fields,
+    unsupported_key,
+)
+from .pyproject_deps import (
+    find_pep_declaration,
+    has_uv_conflicts,
+    is_vcs_path_or_workspace_source,
+    list_top_level_dependency_names,
+    normalize_name,
+)
 from .runner import CommandResult, CommandRunner
 from .versions import version_at_least
 
@@ -35,8 +59,21 @@ class Backend(Protocol):
     def lock_exists(self) -> bool: ...
 
     def files_to_stage(self) -> list[str]:
-        """Files that a successful update may change and that should be
-        committed."""
+        """Files that a successful in-range update may change and that
+        should be committed."""
+        ...
+
+    def major_files_to_stage(self) -> list[str]:
+        """Files that a successful major-bump attempt may change and that
+        should be committed - the manifest in addition to whatever
+        `files_to_stage()` already covers."""
+        ...
+
+    def try_major(self, package: str) -> MajorAttempt | None:
+        """Attempt to raise `package`'s declared constraint so its latest
+        release is allowed, and re-resolve/re-lock it (see `MajorAttempt`
+        for the return contract). Only ever called when `allow-major` is
+        enabled."""
         ...
 
     def install(self) -> CommandResult:
@@ -75,9 +112,43 @@ class PoetryBackend:
         return self.lock_file_path().is_file()
 
     def files_to_stage(self) -> list[str]:
-        # Deliberately just the lock file for now; a major-bump mode will
-        # also need pyproject.toml here.
         return [POETRY_LOCK_FILE]
+
+    def major_files_to_stage(self) -> list[str]:
+        return [PYPROJECT_FILE, POETRY_LOCK_FILE]
+
+    def _pyproject_path(self) -> Path:
+        return Path(self.directory) / PYPROJECT_FILE
+
+    def try_major(self, package: str) -> MajorAttempt | None:
+        if normalize_name(package) == "python":
+            return MajorAttempt(skip_reason="python itself is never bumped")
+
+        pyproject_path = self._pyproject_path()
+        if not pyproject_path.is_file():
+            return MajorAttempt(skip_reason="pyproject.toml not found")
+        before_text = pyproject_path.read_text(encoding="utf-8")
+        before_data = tomllib.loads(before_text)
+
+        plan = _plan_poetry_major(before_data, package)
+        if plan is None or isinstance(plan, str):
+            return None if plan is None else MajorAttempt(skip_reason=plan)
+
+        args = ["poetry", "add", plan.requirement, "-n", *plan.extra_args]
+        result = self.runner.run(args, cwd=self.directory)
+
+        if result.ok:
+            after_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+            if not _poetry_only_version_changed(before_data, after_data, plan):
+                result = CommandResult(
+                    result.args,
+                    1,
+                    result.stdout,
+                    result.stderr
+                    + "\n(discarded: `poetry add` changed more than the version constraint)",
+                )
+
+        return MajorAttempt(resolve_result=result)
 
     def install(self) -> CommandResult:
         return self.runner.run(["poetry", "install"], cwd=self.directory)
@@ -110,6 +181,135 @@ class PoetryBackend:
         return _locked_version(self.lock_file_path(), package)
 
 
+class _PoetryMajorPlan:
+    """What `PoetryBackend.try_major()` decided to run, plus enough about
+    where the dependency was declared to check afterwards that `poetry
+    add` only touched the version constraint."""
+
+    __slots__ = ("requirement", "extra_args", "is_pep", "table", "group", "name", "extras")
+
+    def __init__(self, requirement, extra_args, is_pep, table, group, name, extras):
+        self.requirement = requirement
+        self.extra_args = extra_args
+        self.is_pep = is_pep
+        self.table = table
+        self.group = group
+        self.name = name
+        self.extras = extras
+
+
+def _plan_poetry_major(data: dict, package: str) -> _PoetryMajorPlan | str | None:
+    """Returns a `_PoetryMajorPlan` ready to execute, a string skip reason,
+    or None (no attempt needed - the constraint already has no effective
+    upper bound). Poetry's own tables are checked first: a package
+    declared via `[project.dependencies]` but overridden with a
+    git/path/url/source in `[tool.poetry.dependencies]` must be skipped
+    based on that override, not the plain PEP 508 entry."""
+    table_decl = find_poetry_table_declaration(data, package)
+    if table_decl is not None:
+        bad_key = unsupported_key(table_decl.value)
+        if bad_key:
+            return f"{bad_key} dependency"
+        if isinstance(table_decl.value, list):
+            return "multiple constraint entries (per-python/platform markers)"
+
+        raw_constraint = constraint_text(table_decl.value)
+        if raw_constraint is None:
+            return "no version constraint to raise"
+        clauses = poetry_parse_constraint(raw_constraint)
+        if clauses is None:
+            return "unparsable version constraint"
+        if poetry_is_exact_pin(clauses):
+            return "exact version pin"
+        if not poetry_has_upper_bound(clauses):
+            return None
+
+        extras = extras_of(table_decl.value)
+        extras_part = f"[{','.join(extras)}]" if extras else ""
+        requirement = f"{table_decl.name}{extras_part}@latest"
+
+        extra_args = []
+        if table_decl.table == "tool.poetry.group.dependencies":
+            extra_args += ["--group", table_decl.group]
+        elif table_decl.table == "tool.poetry.dev-dependencies":
+            extra_args += ["--group", "dev"]
+
+        return _PoetryMajorPlan(
+            requirement,
+            extra_args,
+            False,
+            table_decl.table,
+            table_decl.group,
+            table_decl.name,
+            extras,
+        )
+
+    pep_decl = find_pep_declaration(data, package)
+    if pep_decl is not None:
+        parsed = pep_decl.parsed
+        if parsed.is_direct_reference:
+            return "direct URL/path requirement"
+        if parsed.marker:
+            return "environment marker"
+
+        clauses = pep508_parse_specifiers(parsed.specifier_text)
+        if clauses is None:
+            return "unparsable version specifier"
+        if pep508_is_exact_pin(clauses):
+            return "exact version pin"
+        if not pep508_has_upper_bound(clauses):
+            return None
+
+        extras_part = f"[{','.join(parsed.extras)}]" if parsed.extras else ""
+        requirement = f"{parsed.name}{extras_part}@latest"
+
+        extra_args = []
+        if pep_decl.table == "optional-dependencies":
+            extra_args += ["--optional", pep_decl.group]
+        elif pep_decl.table == "dependency-groups" and pep_decl.group:
+            extra_args += ["--group", pep_decl.group]
+
+        return _PoetryMajorPlan(
+            requirement,
+            extra_args,
+            True,
+            pep_decl.table,
+            pep_decl.group,
+            parsed.name,
+            parsed.extras,
+        )
+
+    return "could not locate the dependency declaration"
+
+
+def _poetry_only_version_changed(before: dict, after: dict, plan: _PoetryMajorPlan) -> bool:
+    """True if, comparing the same declaration before/after `poetry add`,
+    nothing but the version constraint itself changed - same table, same
+    group/extra, same extras/optional/other keys. Anything else (moved
+    table, dropped extras, a newly introduced marker, ...) means `poetry
+    add` did something this feature cannot faithfully preserve, and the
+    attempt must be discarded rather than silently kept."""
+    if plan.is_pep:
+        after_decl = find_pep_declaration(after, plan.name)
+        if after_decl is None:
+            return False
+        return (
+            after_decl.table == plan.table
+            and after_decl.group == plan.group
+            and tuple(sorted(after_decl.parsed.extras)) == tuple(sorted(plan.extras))
+            and not after_decl.parsed.marker
+            and not after_decl.parsed.is_direct_reference
+        )
+
+    before_decl = find_poetry_table_declaration(before, plan.name)
+    after_decl = find_poetry_table_declaration(after, plan.name)
+    if before_decl is None or after_decl is None:
+        return False
+    if after_decl.table != plan.table or after_decl.group != plan.group:
+        return False
+    return normalized_extra_fields(before_decl.value) == normalized_extra_fields(after_decl.value)
+
+
 class UvBackend:
     name = "uv"
 
@@ -134,8 +334,97 @@ class UvBackend:
     def files_to_stage(self) -> list[str]:
         return [UV_LOCK_FILE]
 
+    def major_files_to_stage(self) -> list[str]:
+        return [PYPROJECT_FILE, UV_LOCK_FILE]
+
     def _pyproject_path(self) -> Path:
         return Path(self.directory) / PYPROJECT_FILE
+
+    def try_major(self, package: str) -> MajorAttempt | None:
+        if normalize_name(package) == "python":
+            return MajorAttempt(skip_reason="python itself is never bumped")
+
+        pyproject_path = self._pyproject_path()
+        if not pyproject_path.is_file():
+            return MajorAttempt(skip_reason="pyproject.toml not found")
+        before_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+        decl = find_pep_declaration(before_data, package)
+        if decl is None:
+            return MajorAttempt(skip_reason="could not locate the dependency declaration")
+        parsed = decl.parsed
+
+        if parsed.is_direct_reference:
+            return MajorAttempt(skip_reason="direct URL/path requirement")
+        if parsed.marker:
+            return MajorAttempt(skip_reason="environment marker")
+
+        tool_uv = (before_data.get("tool") or {}).get("uv") or {}
+        sources = {normalize_name(k): v for k, v in (tool_uv.get("sources") or {}).items()}
+        if is_vcs_path_or_workspace_source(sources, normalize_name(parsed.name)):
+            return MajorAttempt(skip_reason="git/path/url/workspace source")
+
+        clauses = pep508_parse_specifiers(parsed.specifier_text)
+        if clauses is None:
+            return MajorAttempt(skip_reason="unparsable version specifier")
+        if pep508_is_exact_pin(clauses):
+            return MajorAttempt(skip_reason="exact version pin")
+        if not pep508_has_upper_bound(clauses):
+            return None
+
+        new_spec = pep508_strip_upper_bound(clauses)
+        extras_part = f"[{','.join(parsed.extras)}]" if parsed.extras else ""
+        requirement = f"{parsed.name}{extras_part}{new_spec}"
+
+        # --no-sync: `uv add` would otherwise sync the environment itself,
+        # using its own default group/extra selection and interpreter
+        # discovery rather than this project's (`_sync_args()`, matching
+        # `python-version`/`uv-sync-args`) - do that explicitly below
+        # instead, exactly like `update_package()` does for an in-range
+        # update, so a major attempt leaves the environment in the same
+        # shape either way.
+        args = ["uv", "add", requirement, "--upgrade-package", parsed.name, "--no-sync"]
+        if decl.table == "optional-dependencies":
+            args += ["--optional", decl.group]
+        elif decl.table == "dependency-groups":
+            args += ["--group", decl.group]
+        elif decl.table == "tool.uv.dev-dependencies":
+            args += ["--dev"]
+
+        add_result = self.runner.run(args, cwd=self.directory)
+
+        if not add_result.ok:
+            return MajorAttempt(resolve_result=add_result)
+
+        after_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        after_decl = find_pep_declaration(after_data, package)
+        same_shape = (
+            after_decl is not None
+            and after_decl.table == decl.table
+            and after_decl.group == decl.group
+            and tuple(sorted(after_decl.parsed.extras)) == tuple(sorted(parsed.extras))
+            and not after_decl.parsed.marker
+            and not after_decl.parsed.is_direct_reference
+        )
+        if not same_shape:
+            return MajorAttempt(
+                resolve_result=CommandResult(
+                    add_result.args,
+                    1,
+                    add_result.stdout,
+                    add_result.stderr
+                    + "\n(discarded: `uv add` changed more than the version specifier)",
+                )
+            )
+
+        sync_result = self.sync()
+        combined = CommandResult(
+            add_result.args + sync_result.args,
+            sync_result.returncode,
+            add_result.stdout + "\n" + sync_result.stdout,
+            add_result.stderr + "\n" + sync_result.stderr,
+        )
+        return MajorAttempt(resolve_result=combined)
 
     def _selection_args(self) -> list[str]:
         """Which groups/extras `uv sync` should install.

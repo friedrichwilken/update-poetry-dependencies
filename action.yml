@@ -38,6 +38,9 @@ inputs:
   dry-run:
     description: 'Run the full update loop but skip pushing the branch and creating/updating the PR.'
     default: 'false'
+  allow-major:
+    description: "Opt-in: for each package whose declared constraint would exclude its latest release, also attempt a major bump (raising the constraint) before falling back to the plain in-range update on failure. See the README 'Major bump attempts' section."
+    default: 'false'
   github_token:
     description: 'GitHub token for the PR creation.'
     required: true
@@ -52,11 +55,14 @@ outputs:
   skipped-packages:
     description: 'Comma separated list of packages that had nothing to update.'
     value: ${{ steps.update.outputs.skipped-packages }}
+  held-back-packages:
+    description: "Comma separated list of packages where a major bump was attempted (allow-major) but held back - the package may still show up in passed-packages/failed-packages/skipped-packages for the in-range update that ran instead; see report-json's major_* fields for details."
+    value: ${{ steps.update.outputs.held-back-packages }}
   pr-body:
     description: 'The rendered report / PR body.'
     value: ${{ steps.update.outputs.pr-body }}
   report-json:
-    description: 'JSON array of per-package update records, one object per top-level package: {name, status, old_version, new_version, failure_kind, output_tail}. status is one of "updated", "failed", "skipped"; failure_kind is "resolution", "test", or null.'
+    description: 'JSON array of per-package update records, one object per top-level package: {name, status, old_version, new_version, failure_kind, output_tail}, plus additive fields when allow-major is used: {bump, major_attempted_version, major_failure_kind, major_output_tail, major_skip_reason}. status is one of "updated", "failed", "skipped"; failure_kind is "resolution", "test", or null; bump is "major" or absent.'
     value: ${{ steps.update.outputs.report-json }}
 
 runs:
@@ -80,6 +86,7 @@ runs:
         BRANCH_NAME: ${{ inputs.branch-name }}
         BASE_BRANCH: ${{ inputs.base-branch }}
         DRY_RUN: ${{ inputs.dry-run }}
+        ALLOW_MAJOR: ${{ inputs.allow-major }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
         # The updater itself always runs on a fixed, pinned interpreter
