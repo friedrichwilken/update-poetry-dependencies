@@ -18,11 +18,23 @@ jobs:
 
       - name: Compute major version tag
         id: major
+        # Derived purely from the tag that was just pushed (v2.3.4 -> v2,
+        # v10.0.0 -> v10, ...), so this only ever force-moves the major
+        # tag matching *that* release line. It can never reach v1 - the
+        # legacy bash action, permanently frozen at the v1/v1.0.1 tags
+        # that predate this Python rewrite - unless someone deliberately
+        # pushes a new v1.x.y tag, which the guard below refuses outright.
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           major="${REF_NAME%%.*}"
           echo "tag=$major" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to ever move the legacy v1 tag
+        if: steps.major.outputs.tag == 'v1'
+        run: |
+          echo "::error::refusing to move v1 - that tag is the legacy bash action and is frozen; this workflow is for v2+ releases of the Python rewrite only" >&2
+          exit 1
 
       - name: Force-move the major tag to this release
         env:
@@ -34,8 +46,10 @@ jobs:
           git tag -f "$MAJOR_TAG" "$REF_NAME"
           git push origin "$MAJOR_TAG" --force
 
-      - name: Create GitHub release
+      - name: Create GitHub release (skip if it already exists)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
-        run: gh release create "$REF_NAME" --title "$REF_NAME" --generate-notes
+        run: |
+          gh release view "$REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$REF_NAME" --title "$REF_NAME" --generate-notes
