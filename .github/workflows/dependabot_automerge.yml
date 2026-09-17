@@ -10,14 +10,29 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
+      - name: Check whether auto-merge is enabled for this repo
+        id: allow_auto_merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          allow_auto_merge="$(gh api "repos/$REPO" --jq .allow_auto_merge)"
+          echo "allow_auto_merge=$allow_auto_merge" >> "$GITHUB_OUTPUT"
+          if [ "$allow_auto_merge" != "true" ]; then
+            echo "::warning::this repo's 'Allow auto-merge' setting (Settings > General > Pull Requests) is off, so dependabot PRs cannot be auto-merged; enable it to activate this workflow"
+          fi
+
       - name: Fetch dependabot metadata
         id: metadata
+        if: steps.allow_auto_merge.outputs.allow_auto_merge == 'true'
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable auto-merge for non-major dependabot PRs
-        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        if: |
+          steps.allow_auto_merge.outputs.allow_auto_merge == 'true' &&
+          steps.metadata.outputs.update-type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
