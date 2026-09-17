@@ -48,12 +48,32 @@ def find_project_python(runner: CommandRunner, python_version: str) -> str:
 
 
 def _prepend_to_path(directory: str) -> None:
+    """Make `directory` discoverable both for the rest of *this* process
+    (os.environ, inherited by every subprocess the updater itself spawns
+    from here on) and, via $GITHUB_PATH, for every later step of the same
+    job - e.g. a test-command or a workflow step written by whoever uses
+    this action, run outside the updater's own process entirely."""
     if not directory:
         return
     existing = os.environ.get("PATH", "")
-    if directory in existing.split(os.pathsep):
-        return
-    os.environ["PATH"] = directory + os.pathsep + existing if existing else directory
+    if directory not in existing.split(os.pathsep):
+        os.environ["PATH"] = directory + os.pathsep + existing if existing else directory
+
+    github_path = os.environ.get("GITHUB_PATH")
+    if github_path:
+        with open(github_path, "a", encoding="utf-8") as fh:
+            fh.write(directory + "\n")
+
+
+def _set_env_var(name: str, value: str) -> None:
+    """Same idea as `_prepend_to_path`, for a plain env var: set it for the
+    rest of this process, and persist it via $GITHUB_ENV for later steps."""
+    os.environ[name] = value
+
+    github_env = os.environ.get("GITHUB_ENV")
+    if github_env:
+        with open(github_env, "a", encoding="utf-8") as fh:
+            fh.write(f"{name}={value}\n")
 
 
 def bootstrap_poetry(
@@ -74,7 +94,7 @@ def bootstrap_poetry(
         _prepend_to_path(bin_dir_result.stdout.strip())
 
     # Equivalent to snok/install-poetry's virtualenvs-in-project: true.
-    os.environ[POETRY_VIRTUALENVS_IN_PROJECT] = "true"
+    _set_env_var(POETRY_VIRTUALENVS_IN_PROJECT, "true")
 
     env_use_result = _run(runner, ["poetry", "env", "use", project_python], cwd=directory)
     if not env_use_result.ok:

@@ -68,6 +68,33 @@ def test_bootstrap_poetry_installs_tool_extends_path_and_sets_env(tmp_path):
     assert os.environ["POETRY_VIRTUALENVS_IN_PROJECT"] == "true"
 
 
+def test_bootstrap_poetry_persists_path_and_env_for_later_job_steps(tmp_path):
+    """PATH/env changes made by mutating os.environ only apply to this
+    process and its children - never to a *later*, separate step of the
+    same GitHub Actions job (a fresh shell/process). $GITHUB_PATH and
+    $GITHUB_ENV are the files Actions reads to carry additions forward to
+    those later steps, so bootstrap must write to them too."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    github_path_file = tmp_path / "github_path"
+    github_env_file = tmp_path / "github_env"
+    os.environ["GITHUB_PATH"] = str(github_path_file)
+    os.environ["GITHUB_ENV"] = str(github_env_file)
+
+    runner = FakeCommandRunner(
+        results=[
+            result(True),
+            result(True, stdout=str(bin_dir) + "\n"),
+            result(True),
+        ]
+    )
+
+    bootstrap_poetry(runner, "project/dir", "2.1.3", "/opt/python/3.12/bin/python3.12")
+
+    assert github_path_file.read_text() == str(bin_dir) + "\n"
+    assert github_env_file.read_text() == "POETRY_VIRTUALENVS_IN_PROJECT=true\n"
+
+
 def test_bootstrap_poetry_raises_when_tool_install_fails():
     runner = FakeCommandRunner(results=[result(False, stderr="boom")])
 
