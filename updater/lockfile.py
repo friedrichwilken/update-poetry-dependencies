@@ -14,6 +14,29 @@ from pathlib import Path
 
 from .pyproject_deps import normalize_name
 
+# run_updates() calls locked_version() twice per package against the same
+# lock file, so re-parsing the whole file from scratch every time is
+# wasted work on a project with many packages. A single-entry cache keyed
+# by (path, mtime_ns, size) is enough: within one run the lock file is
+# only ever read (never concurrently written), and clearing it whenever a
+# different key shows up keeps memory bounded to at most one parsed file
+# at a time.
+_cache_key: tuple[str, int, int] | None = None
+_cache_data: dict | None = None
+
+
+def _load(path: Path) -> dict:
+    global _cache_key, _cache_data
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key == _cache_key and _cache_data is not None:
+        return _cache_data
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    _cache_key, _cache_data = key, data
+    return data
+
 
 def locked_version(lock_path: Path | str, package: str) -> str | None:
     """The locked version of `package`, or None if the lock file is
@@ -29,7 +52,7 @@ def locked_version(lock_path: Path | str, package: str) -> str | None:
     if not path.is_file():
         return None
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = _load(path)
     except tomllib.TOMLDecodeError, OSError, UnicodeDecodeError:
         return None
 

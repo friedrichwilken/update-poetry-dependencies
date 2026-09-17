@@ -85,3 +85,35 @@ def test_locked_version_deduplicates_identical_versions_across_entries(tmp_path)
         """
     )
     assert locked_version(lock, "requests") == "2.31.0"
+
+
+def test_locked_version_picks_up_changes_to_the_same_path(tmp_path):
+    """The (path, mtime_ns, size) cache must not return a stale parse once
+    the file on disk has actually changed - this matters because
+    run_updates() calls locked_version() on the same lock file twice per
+    package (before/after each update)."""
+    lock = tmp_path / "poetry.lock"
+    lock.write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4"
+        """
+    )
+    assert locked_version(lock, "idna") == "3.4"
+
+    # Deliberately a different size (not just a touched mtime), so the
+    # cache key changes even on filesystems with coarse mtime resolution.
+    lock.write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4.1"
+
+        [[package]]
+        name = "six"
+        version = "1.16.0"
+        """
+    )
+    assert locked_version(lock, "idna") == "3.4.1"
+    assert locked_version(lock, "six") == "1.16.0"
