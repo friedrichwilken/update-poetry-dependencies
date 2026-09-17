@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .errors import ActionError
+from .lockfile import locked_version as _locked_version
 from .pyproject_deps import has_uv_conflicts, list_top_level_dependency_names
 from .runner import CommandResult, CommandRunner
 from .versions import version_at_least
@@ -50,6 +51,12 @@ class Backend(Protocol):
     def sync(self) -> CommandResult:
         """Re-sync the environment to whatever the lock file currently
         says, without changing the lock file itself."""
+        ...
+
+    def locked_version(self, package: str) -> str | None:
+        """The version(s) `package` is currently locked at, read straight
+        from the lock file (not the installed environment), or None if the
+        lock file does not mention it."""
         ...
 
 
@@ -98,6 +105,9 @@ class PoetryBackend:
         if version_at_least(self.poetry_version, "2"):
             return self.runner.run(["poetry", "sync"], cwd=self.directory)
         return self.runner.run(["poetry", "install", "--sync"], cwd=self.directory)
+
+    def locked_version(self, package: str) -> str | None:
+        return _locked_version(self.lock_file_path(), package)
 
 
 class UvBackend:
@@ -194,6 +204,9 @@ class UvBackend:
 
     def sync(self) -> CommandResult:
         return self.runner.run(self._sync_args(), cwd=self.directory)
+
+    def locked_version(self, package: str) -> str | None:
+        return _locked_version(self.lock_file_path(), package)
 
 
 def make_backend(package_manager: str, runner: CommandRunner, cfg: Config) -> Backend:
