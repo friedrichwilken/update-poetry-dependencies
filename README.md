@@ -23,7 +23,7 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 | pr-labels         | A comma or newline separated list of labels for the PR.                                        | `""`                            | no       |
 | test-command      | A command to run tests after each update. Runs in `directory` via `bash -c`.                   | `""`                            | no       |
 | branch-name       | Fixed branch name used for the update PR. Force-pushed on every run.                            | `deps/test-gated-updates`       | no       |
-| base-branch       | Base branch for the PR.                                                                         | the currently checked out branch | no     |
+| base-branch       | Base branch for the PR. If the checkout is detached (e.g. `pull_request` events), falls back to `GITHUB_BASE_REF`; if neither is available the action fails fast, before doing any work. | the currently checked out branch | no |
 | dry-run           | Run the full update loop but skip pushing the branch and creating/updating the PR.               | `false`                         | no       |
 | github_token      | GitHub token for PR creation.                                                                   |                                  | **yes**  |
 

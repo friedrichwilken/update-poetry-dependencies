@@ -1,4 +1,4 @@
-from poetry_update.versions import parse_version, version_at_least
+from updater.versions import parse_version, version_at_least
 
 
 def test_parse_version_basic():

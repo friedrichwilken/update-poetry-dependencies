@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import sys
+import traceback
 
 from .backend import PoetryBackend
-from .config import Config, check_versions, parse_labels
+from .config import Config, check_versions, parse_labels, resolve_base_branch
 from .errors import ActionError
 from .git_repo import GitRepo
 from .github_pr import GithubPR, create_or_edit
 from .report import render_body, write_outputs
 from .runner import CommandRunner
-from .updater import run_updates
+from .updater import UpdateResult, run_updates
 
 
 def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
+    # Guarantee the outputs are always set, even if something below fails
+    # before a real UpdateResult exists. Any later write_outputs call below
+    # overrides this with real (or partial) data.
+    write_outputs(cfg.github_output, UpdateResult(), "")
+
     check_versions(cfg.python_version, cfg.poetry_version)
 
     runner = runner or CommandRunner()
     backend = backend or PoetryBackend(runner, cfg.directory, cfg.poetry_version)
     git = git or GitRepo(runner, cfg.directory)
+
+    # Resolve and validate the base branch before doing any work: a
+    # misconfigured/detached checkout should fail fast, not after packages
+    # have already been updated, committed and pushed.
+    base_branch = resolve_base_branch(cfg.base_branch, git.current_branch(), cfg.github_base_ref)
 
     if not backend.lock_exists():
         raise ActionError(f"{backend.lock_file_path()} not found; nothing to update")
@@ -34,7 +45,6 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     print(f"top level packages: {', '.join(packages) or '(none)'}")
 
     git.configure_user(cfg.actor, f"{cfg.actor}@users.noreply.github.com")
-    base_branch = cfg.base_branch or git.current_branch()
     start_sha = git.head_sha()
 
     result = run_updates(backend, git, runner, packages, cfg.test_command, cfg.directory)
@@ -82,6 +92,7 @@ def main() -> int:
         print(f"::error::{exc}")
         return 1
     except Exception as exc:  # last-resort: still fail with ::error:: and a clean exit code
+        traceback.print_exc()
         print(f"::error::unexpected failure: {exc}")
         return 1
 

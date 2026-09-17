@@ -1,5 +1,5 @@
-from poetry_update.report import render_body
-from poetry_update.updater import UpdateResult
+from updater.report import render_body
+from updater.updater import UpdateResult
 
 
 def test_render_body_lists_packages_by_section():

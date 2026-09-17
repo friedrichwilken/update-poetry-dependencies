@@ -55,11 +55,11 @@ class GithubPR:
             args += ["--label", label]
         return self.runner.run(args, cwd=self.directory)
 
-    def edit(self, number: int, title: str, body: str):
-        return self.runner.run(
-            ["gh", "pr", "edit", str(number), "--title", title, "--body", body],
-            cwd=self.directory,
-        )
+    def edit(self, number: int, title: str, body: str, labels: list[str] | None = None):
+        args = ["gh", "pr", "edit", str(number), "--title", title, "--body", body]
+        for label in labels or []:
+            args += ["--add-label", label]
+        return self.runner.run(args, cwd=self.directory)
 
 
 def create_or_edit(gh: "GithubPR", branch: str, title: str, body: str, base: str, labels: list[str]):
@@ -68,5 +68,5 @@ def create_or_edit(gh: "GithubPR", branch: str, title: str, body: str, base: str
     testable without going through the full `run()` orchestration."""
     existing = gh.find_open(branch)
     if existing is not None:
-        return existing, gh.edit(existing, title, body)
+        return existing, gh.edit(existing, title, body, labels)
     return None, gh.create(title, body, base=base, head=branch, labels=labels)

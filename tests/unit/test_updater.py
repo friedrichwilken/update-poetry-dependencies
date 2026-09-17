@@ -1,6 +1,8 @@
+import pytest
 from fakes import FakeBackend, FakeGit, FakeRunner, result
 
-from poetry_update.updater import run_updates
+from updater.errors import ActionError
+from updater.updater import run_updates
 
 
 def test_package_passes_when_lock_changes_and_test_succeeds():
@@ -36,7 +38,7 @@ def test_package_skipped_when_lock_does_not_change():
     assert git.commit_messages == []
 
 
-def test_poetry_update_failure_counts_as_failed_and_resyncs():
+def test_updater_failure_counts_as_failed_and_resyncs():
     backend = FakeBackend(update_ok={"a": False})
     git = FakeGit(diff_results=[])
     runner = FakeRunner()
@@ -75,6 +77,32 @@ def test_only_lock_file_is_staged():
     run_updates(backend, git, runner, ["a"], "", "dir")
 
     assert git.staged_calls == [["poetry.lock"]]
+
+
+def test_failed_resync_after_update_failure_aborts_the_run():
+    backend = FakeBackend(update_ok={"a": False, "b": True}, sync_ok=False)
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner()
+
+    with pytest.raises(ActionError):
+        run_updates(backend, git, runner, ["a", "b"], "pytest", "dir")
+
+    # a is recorded as failed before the resync is attempted and found broken
+    assert backend.sync_calls == 1
+    # b is never touched once the environment is known to be broken
+    assert backend.updated_packages == ["a"]
+
+
+def test_failed_resync_after_test_failure_aborts_the_run():
+    backend = FakeBackend(update_ok={"a": True, "b": True}, sync_ok=False)
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner(shell_results=[result(False)])
+
+    with pytest.raises(ActionError):
+        run_updates(backend, git, runner, ["a", "b"], "pytest", "dir")
+
+    assert backend.sync_calls == 1
+    assert backend.updated_packages == ["a"]
 
 
 def test_test_command_runs_in_project_directory():

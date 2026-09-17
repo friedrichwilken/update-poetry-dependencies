@@ -1,7 +1,7 @@
 import pytest
 
-from poetry_update.config import check_versions, parse_labels
-from poetry_update.errors import ActionError
+from updater.config import check_versions, parse_labels, resolve_base_branch
+from updater.errors import ActionError
 
 
 def test_parse_labels_comma_separated():
@@ -48,3 +48,29 @@ def test_check_versions_rejects_old_python():
 def test_check_versions_rejects_old_poetry():
     with pytest.raises(ActionError):
         check_versions("3.12.7", "1.1.0")
+
+
+def test_resolve_base_branch_prefers_explicit_input():
+    assert resolve_base_branch("release", "feature", "main") == "release"
+
+
+def test_resolve_base_branch_prefers_explicit_input_even_when_detached():
+    assert resolve_base_branch("release", "HEAD", "main") == "release"
+
+
+def test_resolve_base_branch_uses_current_branch_when_not_detached():
+    assert resolve_base_branch("", "feature", "") == "feature"
+
+
+def test_resolve_base_branch_falls_back_to_github_base_ref_when_detached():
+    assert resolve_base_branch("", "HEAD", "main") == "main"
+
+
+def test_resolve_base_branch_raises_when_detached_and_no_fallback():
+    with pytest.raises(ActionError):
+        resolve_base_branch("", "HEAD", "")
+
+
+def test_resolve_base_branch_raises_when_current_branch_is_empty_and_no_fallback():
+    with pytest.raises(ActionError):
+        resolve_base_branch("", "", "")

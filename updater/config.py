@@ -38,6 +38,30 @@ def check_versions(python_version: str, poetry_version: str) -> None:
         )
 
 
+def resolve_base_branch(explicit: str, current_branch: str, github_base_ref: str) -> str:
+    """Decide which branch the update PR should target.
+
+    `git rev-parse --abbrev-ref HEAD` returns the literal string "HEAD" on a
+    detached checkout, which happens on pull_request/tag/explicit-SHA
+    checkouts. Falling back to that would push a branch and then fail (or
+    worse, succeed) with `--base HEAD`. Preference order: the explicit
+    `base-branch` input, then the checked-out branch if it is not detached,
+    then `GITHUB_BASE_REF` (set by Actions on pull_request events), else
+    fail loudly so the caller sets `base-branch` explicitly.
+    """
+    if explicit:
+        return explicit
+    if current_branch and current_branch != "HEAD":
+        return current_branch
+    if github_base_ref:
+        return github_base_ref
+    raise ActionError(
+        "could not determine the base branch: the checkout is in a detached "
+        "HEAD state and GITHUB_BASE_REF is not set; pass the base-branch "
+        "input explicitly"
+    )
+
+
 @dataclass
 class Config:
     python_version: str
@@ -46,9 +70,9 @@ class Config:
     pr_title_prefix: str
     pr_labels: str
     test_command: str
-    github_token: str
     branch_name: str
     base_branch: str
+    github_base_ref: str
     dry_run: bool
     actor: str
     server_url: str
@@ -70,9 +94,9 @@ class Config:
             pr_title_prefix=get("PR_TITLE_PREFIX"),
             pr_labels=get("PR_LABELS"),
             test_command=get("TEST_COMMAND"),
-            github_token=get("GITHUB_TOKEN_INPUT"),
             branch_name=get("BRANCH_NAME", "deps/test-gated-updates"),
             base_branch=get("BASE_BRANCH"),
+            github_base_ref=get("GITHUB_BASE_REF", ""),
             dry_run=parse_bool(get("DRY_RUN", "false")),
             actor=get("GITHUB_ACTOR", "github-actions[bot]"),
             server_url=get("GITHUB_SERVER_URL", "https://github.com"),

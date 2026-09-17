@@ -5,7 +5,7 @@ code decided to do."""
 
 from __future__ import annotations
 
-from poetry_update.runner import CommandResult
+from updater.runner import CommandResult
 
 
 def result(ok: bool = True, stdout: str = "", stderr: str = "") -> CommandResult:
@@ -13,9 +13,15 @@ def result(ok: bool = True, stdout: str = "", stderr: str = "") -> CommandResult
 
 
 class FakeBackend:
-    def __init__(self, update_ok: dict | None = None, lock_exists: bool = True):
+    def __init__(
+        self,
+        update_ok: dict | None = None,
+        lock_exists: bool = True,
+        sync_ok: bool = True,
+    ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
+        self._sync_ok = sync_ok
         self.updated_packages: list[str] = []
         self.sync_calls = 0
         self.install_calls = 0
@@ -42,13 +48,19 @@ class FakeBackend:
 
     def sync(self) -> CommandResult:
         self.sync_calls += 1
-        return result(True)
+        return result(self._sync_ok)
 
 
 class FakeGit:
-    def __init__(self, diff_results: list | None = None, head_shas: list | None = None):
+    def __init__(
+        self,
+        diff_results: list | None = None,
+        head_shas: list | None = None,
+        current_branch: str = "main",
+    ):
         self._diff_results = list(diff_results or [])
         self._head_shas = list(head_shas or ["sha0"])
+        self._current_branch = current_branch
         self.reset_calls: list[list[str]] = []
         self.staged_calls: list[list[str]] = []
         self.commit_messages: list[str] = []
@@ -60,7 +72,7 @@ class FakeGit:
         self.configured = True
 
     def current_branch(self) -> str:
-        return "main"
+        return self._current_branch
 
     def head_sha(self) -> str:
         if len(self._head_shas) > 1:
@@ -118,6 +130,8 @@ class FakeGithubPR:
         )
         return result(True)
 
-    def edit(self, number, title, body):
-        self.edit_calls.append({"number": number, "title": title, "body": body})
+    def edit(self, number, title, body, labels=None):
+        self.edit_calls.append(
+            {"number": number, "title": title, "body": body, "labels": labels or []}
+        )
         return result(True)

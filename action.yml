@@ -76,7 +76,6 @@ runs:
         BRANCH_NAME: ${{ inputs.branch-name }}
         BASE_BRANCH: ${{ inputs.base-branch }}
         DRY_RUN: ${{ inputs.dry-run }}
-        GITHUB_TOKEN_INPUT: ${{ inputs.github_token }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        PYTHONPATH="$GITHUB_ACTION_PATH" python -m poetry_update
+        PYTHONPATH="$GITHUB_ACTION_PATH" python -m updater

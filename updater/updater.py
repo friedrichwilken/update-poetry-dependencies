@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .backend import PoetryBackend
+from .errors import ActionError
 from .git_repo import GitRepo
 from .runner import CommandRunner
 
@@ -12,6 +13,24 @@ class UpdateResult:
     passed: list = field(default_factory=list)
     failed: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
+
+
+def _reset_and_resync(backend: PoetryBackend, git: GitRepo, files: list[str], package: str) -> None:
+    """Discard the lock file change for `package` and re-sync the
+    environment to it. If the re-sync itself fails, the environment is left
+    in an unknown state and it is not safe to keep testing later packages
+    against it, so this aborts the whole run (packages already committed
+    stay committed)."""
+    git.reset_files(files)
+    sync_result = backend.sync()
+    print(sync_result.stdout)
+    print(sync_result.stderr)
+    if not sync_result.ok:
+        raise ActionError(
+            f"failed to re-sync the environment to the lock file after "
+            f"{package}; aborting to avoid testing later packages against a "
+            f"broken environment"
+        )
 
 
 def run_updates(
@@ -43,8 +62,7 @@ def run_updates(
         if not update_result.ok:
             print(f"poetry update failed for {package}, discarding changes")
             result.failed.append(package)
-            git.reset_files(files)
-            backend.sync()
+            _reset_and_resync(backend, git, files, package)
             print("::endgroup::")
             continue
 
@@ -71,8 +89,7 @@ def run_updates(
         else:
             print(f"test failed for {package}, discarding changes")
             result.failed.append(package)
-            git.reset_files(files)
-            backend.sync()
+            _reset_and_resync(backend, git, files, package)
 
         print("::endgroup::")
 
