@@ -196,7 +196,7 @@ class UvBackend:
         return self.runner.run(self._sync_args(), cwd=self.directory)
 
 
-def make_backend(package_manager: str, runner: CommandRunner, cfg: "Config") -> Backend:
+def make_backend(package_manager: str, runner: CommandRunner, cfg: Config) -> Backend:
     if package_manager == "poetry":
         return PoetryBackend(runner, cfg.directory, cfg.poetry_version)
     if package_manager == "uv":

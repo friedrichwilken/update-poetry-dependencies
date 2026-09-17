@@ -40,6 +40,5 @@ def detect_package_manager(directory: str, requested: str) -> str:
     if has_poetry:
         return "poetry"
     raise ActionError(
-        f"neither {UV_LOCK_FILE} nor {POETRY_LOCK_FILE} found in {directory}; "
-        "nothing to update"
+        f"neither {UV_LOCK_FILE} nor {POETRY_LOCK_FILE} found in {directory}; nothing to update"
     )

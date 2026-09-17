@@ -91,7 +91,9 @@ def test_dependency_groups_are_included(tmp_path):
     assert list_top_level_dependency_names(path) == ["idna", "pytest", "ruff"]
 
 
-def test_dependency_groups_include_group_entries_are_skipped_but_target_group_still_walked(tmp_path):
+def test_dependency_groups_include_group_entries_are_skipped_but_target_group_still_walked(
+    tmp_path,
+):
     path = write(
         tmp_path,
         """
@@ -188,17 +190,17 @@ def test_duplicates_across_sections_are_deduplicated(tmp_path):
 
 
 def test_empty_pyproject_has_no_dependencies(tmp_path):
-    path = write(tmp_path, "[project]\nname = \"x\"\n")
+    path = write(tmp_path, '[project]\nname = "x"\n')
     assert list_top_level_dependency_names(path) == []
 
 
 def test_has_uv_conflicts_false_when_absent(tmp_path):
-    path = write(tmp_path, "[project]\nname = \"x\"\n")
+    path = write(tmp_path, '[project]\nname = "x"\n')
     assert has_uv_conflicts(path) is False
 
 
 def test_has_uv_conflicts_false_when_empty(tmp_path):
-    path = write(tmp_path, "[project]\nname = \"x\"\n\n[tool.uv]\nconflicts = []\n")
+    path = write(tmp_path, '[project]\nname = "x"\n\n[tool.uv]\nconflicts = []\n')
     assert has_uv_conflicts(path) is False
 
 

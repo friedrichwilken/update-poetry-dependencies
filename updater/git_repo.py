@@ -17,9 +17,7 @@ class GitRepo:
         self.runner.run(["git", "config", "user.email", email], cwd=self.directory)
 
     def current_branch(self) -> str:
-        result = self.runner.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.directory
-        )
+        result = self.runner.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.directory)
         return result.stdout.strip()
 
     def head_sha(self) -> str:
@@ -28,9 +26,7 @@ class GitRepo:
 
     def diff_changed(self, paths: list[str]) -> bool:
         """True if any of `paths` differ from what is committed."""
-        result = self.runner.run(
-            ["git", "diff", "--quiet", "--"] + paths, cwd=self.directory
-        )
+        result = self.runner.run(["git", "diff", "--quiet", "--"] + paths, cwd=self.directory)
         return result.returncode != 0
 
     def reset_files(self, paths: list[str]) -> None:
@@ -48,6 +44,4 @@ class GitRepo:
         return self.runner.run(["git", "checkout", "-B", branch], cwd=self.directory)
 
     def push(self, branch: str) -> CommandResult:
-        return self.runner.run(
-            ["git", "push", "--force", "origin", branch], cwd=self.directory
-        )
+        return self.runner.run(["git", "push", "--force", "origin", branch], cwd=self.directory)

@@ -79,12 +79,8 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     title = f"{cfg.pr_title_prefix}Update and successfully test packages"
     labels = parse_labels(cfg.pr_labels)
 
-    existing_pr, pr_result = create_or_edit(
-        gh, cfg.branch_name, title, body, base_branch, labels
-    )
-    print(
-        f"updated existing PR #{existing_pr}" if existing_pr is not None else "created PR"
-    )
+    existing_pr, pr_result = create_or_edit(gh, cfg.branch_name, title, body, base_branch, labels)
+    print(f"updated existing PR #{existing_pr}" if existing_pr is not None else "created PR")
 
     if not pr_result.ok:
         raise ActionError(f"gh pr create/edit failed: {pr_result.stderr}")

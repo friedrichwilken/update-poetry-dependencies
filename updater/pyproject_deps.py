@@ -88,9 +88,7 @@ def list_top_level_dependency_names(pyproject_path: Path) -> list[str]:
     tool_uv = (data.get("tool") or {}).get("uv") or {}
     requirements.extend(tool_uv.get("dev-dependencies") or [])
 
-    sources = {
-        normalize_name(k): v for k, v in (tool_uv.get("sources") or {}).items()
-    }
+    sources = {normalize_name(k): v for k, v in (tool_uv.get("sources") or {}).items()}
 
     names = set()
     for requirement in requirements:

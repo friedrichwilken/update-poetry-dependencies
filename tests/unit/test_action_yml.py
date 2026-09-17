@@ -22,7 +22,7 @@ def _run_block_lines(text: str) -> list[str]:
         stripped = line.strip()
         if not in_block and stripped.startswith("run:"):
             key_indent = len(line) - len(line.lstrip())
-            after = stripped[len("run:"):].strip()
+            after = stripped[len("run:") :].strip()
             block_scalar_indicators = ("|", ">", "|-", ">-", "|+", ">+")
             if after and after not in block_scalar_indicators:
                 # inline `run: some command` on the same line as the key
