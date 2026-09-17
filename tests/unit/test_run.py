@@ -25,6 +25,7 @@ def make_cfg(**overrides):
         repository="owner/repo",
         run_id="1",
         github_output="",
+        github_step_summary="",
     )
     base.update(overrides)
     return Config(**base)
@@ -149,6 +150,61 @@ def test_failed_resync_aborts_the_run():
     assert backend.sync_calls == 1
 
 
+def test_failed_resync_never_pushes_or_touches_pr_even_though_a_was_committed():
+    """a passes and is committed; b then fails to re-sync and aborts the
+    run. The already-made commit for a must stay local - it must not be
+    pushed, and no PR may be created/edited, since the run as a whole
+    failed."""
+    cfg = make_cfg(dry_run=False, test_command="")
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False}, sync_ok=False, versions={"a": ["1.0.0", "1.1.0"]}
+    )
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.0"]
+    assert git.checkout_branches == []
+    assert git.push_branches == []
+    assert gh.create_calls == []
+    assert gh.edit_calls == []
+
+
+def test_failed_resync_writes_partial_outputs_with_an_aborted_banner(tmp_path):
+    output_file = tmp_path / "output.txt"
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(
+        dry_run=False,
+        test_command="",
+        github_output=str(output_file),
+        github_step_summary=str(summary_file),
+    )
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False}, sync_ok=False, versions={"a": ["1.0.0", "1.1.0"]}
+    )
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    content = output_file.read_text()
+    # the outputs written for the abort must reflect the partial result
+    # (a already succeeded), not the early empty guard write
+    assert "passed-packages=a\n" in content
+    assert "failed-packages=b\n" in content
+
+    pr_body_start = content.index("pr-body<<")
+    pr_body = content[pr_body_start:]
+    assert "Run aborted" in pr_body
+    assert "a" in pr_body
+
+    summary = summary_file.read_text()
+    assert "Run aborted" in summary
+
+
 def test_outputs_are_always_written_even_on_early_failure(tmp_path):
     output_file = tmp_path / "output.txt"
     cfg = make_cfg(python_version="3.5", github_output=str(output_file))
@@ -164,3 +220,37 @@ def test_outputs_are_always_written_even_on_early_failure(tmp_path):
     assert "failed-packages=\n" in content
     assert "skipped-packages=\n" in content
     assert "pr-body<<" in content
+
+
+def test_job_summary_is_written_when_github_step_summary_is_set(tmp_path):
+    output_file = tmp_path / "output.txt"
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(
+        dry_run=True,
+        github_output=str(output_file),
+        github_step_summary=str(summary_file),
+    )
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    summary = summary_file.read_text()
+    assert "Workflow run:" in summary
+    assert "a" in summary
+
+
+def test_job_summary_is_written_even_in_dry_run(tmp_path):
+    """dry-run must not skip the job summary write - only the push/PR
+    steps are skipped."""
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(dry_run=True, github_step_summary=str(summary_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert summary_file.exists()
+    assert summary_file.read_text().strip() != ""

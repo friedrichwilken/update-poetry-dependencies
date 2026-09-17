@@ -110,6 +110,11 @@ jobs:
 
           exit $status
 
+      - name: Assert report-json shape
+        env:
+          REPORT_JSON: ${{ steps.update.outputs.report-json }}
+        run: python3 .github/scripts/assert_report_json.py
+
       - name: Verify the fixture environment is healthy after the run
         working-directory: ${{ matrix.directory }}
         env:

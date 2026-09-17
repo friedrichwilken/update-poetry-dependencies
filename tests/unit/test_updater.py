@@ -1,12 +1,15 @@
 import pytest
 from fakes import FakeBackend, FakeGit, FakeRunner, result
 
-from updater.errors import ActionError
+from updater.errors import ActionError, UpdateAborted
 from updater.updater import run_updates
 
 
 def test_package_passes_when_lock_changes_and_test_succeeds():
-    backend = FakeBackend(update_ok={"a": True, "b": True})
+    backend = FakeBackend(
+        update_ok={"a": True, "b": True},
+        versions={"a": ["1.0.0", "1.1.0"], "b": ["2.0.0", "2.1.0"]},
+    )
     git = FakeGit(diff_results=[True, True])
     runner = FakeRunner()
 
@@ -16,15 +19,22 @@ def test_package_passes_when_lock_changes_and_test_succeeds():
     assert res.failed == []
     assert res.skipped == []
     assert git.commit_messages == [
-        "Update and successfully test a",
-        "Update and successfully test b",
+        "Update a 1.0.0 -> 1.1.0",
+        "Update b 2.0.0 -> 2.1.0",
     ]
     assert backend.sync_calls == 0
     assert runner.shell_calls == []
 
+    outcomes = {o.name: o for o in res.outcomes}
+    assert outcomes["a"].status == "updated"
+    assert outcomes["a"].old_version == "1.0.0"
+    assert outcomes["a"].new_version == "1.1.0"
+    assert outcomes["a"].failure_kind is None
+    assert outcomes["a"].output_tail == ""
+
 
 def test_package_skipped_when_lock_does_not_change():
-    backend = FakeBackend(update_ok={"a": True})
+    backend = FakeBackend(update_ok={"a": True}, versions={"a": ["1.0.0"]})
     git = FakeGit(diff_results=[False])
     runner = FakeRunner()
 
@@ -37,9 +47,14 @@ def test_package_skipped_when_lock_does_not_change():
     assert runner.shell_calls == []
     assert git.commit_messages == []
 
+    outcome = res.outcomes[0]
+    assert outcome.status == "skipped"
+    assert outcome.old_version == "1.0.0"
+    assert outcome.new_version == "1.0.0"
+
 
 def test_updater_failure_counts_as_failed_and_resyncs():
-    backend = FakeBackend(update_ok={"a": False})
+    backend = FakeBackend(update_ok={"a": False}, versions={"a": ["1.0.0", "1.0.0"]})
     git = FakeGit(diff_results=[])
     runner = FakeRunner()
 
@@ -53,11 +68,35 @@ def test_updater_failure_counts_as_failed_and_resyncs():
     # the test command never runs for a package whose update itself failed
     assert runner.shell_calls == []
 
+    outcome = res.outcomes[0]
+    assert outcome.status == "failed"
+    assert outcome.failure_kind == "resolution"
+    assert outcome.old_version == "1.0.0"
+    assert outcome.new_version == "1.0.0"
+
+
+def test_resolution_failure_captures_output_tail():
+    backend = FakeBackend(update_ok={"a": False})
+    backend.update_package = lambda package: result(
+        False, stdout="line1\nline2\n", stderr="resolver blew up\n"
+    )
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["a"], "", "dir")
+
+    outcome = res.outcomes[0]
+    assert "line1" in outcome.output_tail
+    assert "resolver blew up" in outcome.output_tail
+
 
 def test_failed_test_resyncs_and_does_not_stop_later_packages():
-    backend = FakeBackend(update_ok={"a": True, "b": False, "c": True})
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False, "c": True},
+        versions={"a": ["1.0.0", "1.1.0"], "c": ["3.0.0", "3.1.0"]},
+    )
     git = FakeGit(diff_results=[True, True])  # only for a and c; b fails before diff check
-    runner = FakeRunner(shell_results=[result(True), result(False)])
+    runner = FakeRunner(shell_results=[result(True), result(False, stderr="assertion failed")])
 
     res = run_updates(backend, git, runner, ["a", "b", "c"], "pytest", "dir")
 
@@ -67,6 +106,13 @@ def test_failed_test_resyncs_and_does_not_stop_later_packages():
     assert backend.sync_calls == 2  # for b (update failure) and c (test failure)
     assert git.reset_calls == [["poetry.lock"], ["poetry.lock"]]
     assert len(runner.shell_calls) == 2  # only a and c reach the test stage
+
+    outcomes = {o.name: o for o in res.outcomes}
+    assert outcomes["b"].failure_kind == "resolution"
+    assert outcomes["c"].failure_kind == "test"
+    assert "assertion failed" in outcomes["c"].output_tail
+    assert outcomes["c"].old_version == "3.0.0"
+    assert outcomes["c"].new_version == "3.1.0"
 
 
 def test_only_lock_file_is_staged():
@@ -105,6 +151,47 @@ def test_failed_resync_after_test_failure_aborts_the_run():
     assert backend.updated_packages == ["a"]
 
 
+def test_failed_resync_raises_update_aborted_carrying_the_partial_result():
+    """The abort must not lose the outcomes already recorded (here: a's
+    resolution failure) - it is raised as an UpdateAborted carrying the
+    partial UpdateResult, not a bare ActionError, precisely so the caller
+    can still report on it."""
+    backend = FakeBackend(update_ok={"a": False, "b": True}, sync_ok=False)
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner()
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "pytest", "dir")
+
+    partial = excinfo.value.result
+    assert [o.name for o in partial.outcomes] == ["a"]
+    assert partial.outcomes[0].status == "failed"
+    assert partial.outcomes[0].failure_kind == "resolution"
+    # b was never reached, so it must not appear in the partial result
+    assert "b" not in [o.name for o in partial.outcomes]
+
+
+def test_failed_resync_after_a_passing_package_keeps_that_commit_in_the_partial_result():
+    """a passes and is committed; b then fails to re-sync. The partial
+    result must still include a's successful outcome - its commit was
+    already made and stays made, only the run as a whole is aborted."""
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False},
+        sync_ok=False,
+        versions={"a": ["1.0.0", "1.1.0"]},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "", "dir")
+
+    partial = excinfo.value.result
+    names_and_status = [(o.name, o.status) for o in partial.outcomes]
+    assert names_and_status == [("a", "updated"), ("b", "failed")]
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.0"]
+
+
 def test_run_updates_is_backend_agnostic_and_stages_whatever_lock_file_the_backend_reports():
     """The update loop must not know or care which backend it is driving:
     a uv-flavoured backend (uv.lock instead of poetry.lock) goes through
@@ -127,3 +214,13 @@ def test_test_command_runs_in_project_directory():
     run_updates(backend, git, runner, ["a"], "pytest", "some/project/dir")
 
     assert runner.shell_calls == [("pytest", "some/project/dir")]
+
+
+def test_locked_version_is_read_before_and_after_the_update_attempt():
+    backend = FakeBackend(update_ok={"a": True}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    run_updates(backend, git, runner, ["a"], "", "dir")
+
+    assert backend.locked_version_calls == ["a", "a"]

@@ -225,6 +225,34 @@ def test_make_backend_returns_uv_backend():
     assert isinstance(backend, UvBackend)
 
 
+def test_poetry_backend_locked_version_reads_the_lock_file(tmp_path):
+    (tmp_path / "poetry.lock").write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4"
+        """
+    )
+    backend = PoetryBackend(FakeCommandRunner(), str(tmp_path), "2.1.3")
+
+    assert backend.locked_version("idna") == "3.4"
+    assert backend.locked_version("nonexistent") is None
+
+
+def test_uv_backend_locked_version_reads_the_lock_file(tmp_path):
+    (tmp_path / "uv.lock").write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4"
+        """
+    )
+    backend = UvBackend(FakeCommandRunner(), str(tmp_path), "3.12")
+
+    assert backend.locked_version("idna") == "3.4"
+    assert backend.locked_version("nonexistent") is None
+
+
 def test_make_backend_raises_for_unknown_manager():
     class Cfg:
         directory = "."
