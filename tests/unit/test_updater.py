@@ -1,7 +1,7 @@
 import pytest
 from fakes import FakeBackend, FakeGit, FakeRunner, result
 
-from updater.errors import ActionError
+from updater.errors import ActionError, UpdateAborted
 from updater.updater import run_updates
 
 
@@ -149,6 +149,47 @@ def test_failed_resync_after_test_failure_aborts_the_run():
 
     assert backend.sync_calls == 1
     assert backend.updated_packages == ["a"]
+
+
+def test_failed_resync_raises_update_aborted_carrying_the_partial_result():
+    """The abort must not lose the outcomes already recorded (here: a's
+    resolution failure) - it is raised as an UpdateAborted carrying the
+    partial UpdateResult, not a bare ActionError, precisely so the caller
+    can still report on it."""
+    backend = FakeBackend(update_ok={"a": False, "b": True}, sync_ok=False)
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner()
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "pytest", "dir")
+
+    partial = excinfo.value.result
+    assert [o.name for o in partial.outcomes] == ["a"]
+    assert partial.outcomes[0].status == "failed"
+    assert partial.outcomes[0].failure_kind == "resolution"
+    # b was never reached, so it must not appear in the partial result
+    assert "b" not in [o.name for o in partial.outcomes]
+
+
+def test_failed_resync_after_a_passing_package_keeps_that_commit_in_the_partial_result():
+    """a passes and is committed; b then fails to re-sync. The partial
+    result must still include a's successful outcome - its commit was
+    already made and stays made, only the run as a whole is aborted."""
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False},
+        sync_ok=False,
+        versions={"a": ["1.0.0", "1.1.0"]},
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "", "dir")
+
+    partial = excinfo.value.result
+    names_and_status = [(o.name, o.status) for o in partial.outcomes]
+    assert names_and_status == [("a", "updated"), ("b", "failed")]
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.0"]
 
 
 def test_run_updates_is_backend_agnostic_and_stages_whatever_lock_file_the_backend_reports():

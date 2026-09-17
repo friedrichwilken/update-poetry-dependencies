@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from .backend import Backend
-from .errors import ActionError
+from .errors import UpdateAborted
 from .git_repo import GitRepo
 from .runner import CommandRunner
 from .textcap import capture_tail
@@ -62,21 +62,25 @@ def _fmt_version(version: str | None) -> str:
     return version if version else "unknown"
 
 
-def _reset_and_resync(backend: Backend, git: GitRepo, files: list[str], package: str) -> None:
+def _reset_and_resync(
+    backend: Backend, git: GitRepo, files: list[str], package: str, result: UpdateResult
+) -> None:
     """Discard the lock file change for `package` and re-sync the
     environment to it. If the re-sync itself fails, the environment is left
     in an unknown state and it is not safe to keep testing later packages
     against it, so this aborts the whole run (packages already committed
-    stay committed)."""
+    stay committed) - raising `UpdateAborted` rather than a bare
+    `ActionError` so the partial `result` built so far is not lost."""
     git.reset_files(files)
     sync_result = backend.sync()
     print(sync_result.stdout)
     print(sync_result.stderr)
     if not sync_result.ok:
-        raise ActionError(
+        raise UpdateAborted(
             f"failed to re-sync the environment to the lock file after "
             f"{package}; aborting to avoid testing later packages against a "
-            f"broken environment"
+            f"broken environment",
+            result,
         )
 
 
@@ -121,7 +125,7 @@ def run_updates(
                     output_tail=capture_tail(update_result.stdout + "\n" + update_result.stderr),
                 )
             )
-            _reset_and_resync(backend, git, files, package)
+            _reset_and_resync(backend, git, files, package, result)
             print("::endgroup::")
             continue
 
@@ -174,7 +178,7 @@ def run_updates(
                     output_tail=capture_tail(test_result.stdout + "\n" + test_result.stderr),
                 )
             )
-            _reset_and_resync(backend, git, files, package)
+            _reset_and_resync(backend, git, files, package, result)
 
         print("::endgroup::")
 
