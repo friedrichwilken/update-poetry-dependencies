@@ -1,6 +1,6 @@
 import pytest
 
-from updater.pyproject_deps import list_top_level_dependency_names, normalize_name
+from updater.pyproject_deps import has_uv_conflicts, list_top_level_dependency_names, normalize_name
 
 
 def write(tmp_path, text):
@@ -190,3 +190,27 @@ def test_duplicates_across_sections_are_deduplicated(tmp_path):
 def test_empty_pyproject_has_no_dependencies(tmp_path):
     path = write(tmp_path, "[project]\nname = \"x\"\n")
     assert list_top_level_dependency_names(path) == []
+
+
+def test_has_uv_conflicts_false_when_absent(tmp_path):
+    path = write(tmp_path, "[project]\nname = \"x\"\n")
+    assert has_uv_conflicts(path) is False
+
+
+def test_has_uv_conflicts_false_when_empty(tmp_path):
+    path = write(tmp_path, "[project]\nname = \"x\"\n\n[tool.uv]\nconflicts = []\n")
+    assert has_uv_conflicts(path) is False
+
+
+def test_has_uv_conflicts_true_when_declared(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+
+        [tool.uv]
+        conflicts = [[{extra = "cpu"}, {extra = "gpu"}]]
+        """,
+    )
+    assert has_uv_conflicts(path) is True

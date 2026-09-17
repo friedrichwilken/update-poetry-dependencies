@@ -11,6 +11,9 @@ inputs:
   poetry-version:
     description: "The Poetry version to use. Only used when the poetry backend is selected."
     default: '2.1.3'
+  uv-sync-args:
+    description: "Only used when the uv backend is selected. Overrides the default `--all-groups --all-extras` group/extra selection passed to `uv sync` (parsed as shell arguments, e.g. '--extra cpu --group dev'). Needed when the project declares `tool.uv.conflicts`, since `--all-groups --all-extras` would otherwise try to select mutually exclusive extras/groups and `uv sync` would fail outright."
+    default: ''
   directory:
     description: "The directory of the project files."
     default: './'
@@ -63,6 +66,7 @@ runs:
         PYTHON_VERSION: ${{ inputs.python-version }}
         PACKAGE_MANAGER: ${{ inputs.package-manager }}
         POETRY_VERSION: ${{ inputs.poetry-version }}
+        UV_SYNC_ARGS: ${{ inputs.uv-sync-args }}
         DIRECTORY: ${{ inputs.directory }}
         PR_TITLE_PREFIX: ${{ inputs.pr-title-prefix }}
         PR_LABELS: ${{ inputs.pr-labels }}

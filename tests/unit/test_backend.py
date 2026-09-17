@@ -44,7 +44,7 @@ def test_uv_backend_update_package_locks_then_syncs():
     backend.update_package("idna")
 
     assert runner.calls[0] == {
-        "args": ["uv", "lock", "--upgrade-package", "idna"],
+        "args": ["uv", "lock", "--upgrade-package", "idna", "--python", "3.12"],
         "cwd": "some/dir",
     }
     assert runner.calls[1]["args"][:2] == ["uv", "sync"]
@@ -95,11 +95,102 @@ def test_uv_backend_list_top_level_packages_raises_when_pyproject_missing(tmp_pa
         backend.list_top_level_packages()
 
 
+def test_uv_sync_args_replaces_the_default_selection(tmp_path):
+    """Default '--all-groups --all-extras' is unconditional and fails
+    outright for a project with tool.uv.conflicts ("Extras `cpu` and `gpu`
+    are incompatible with the declared conflicts"); uv-sync-args, when
+    set, always wins and replaces it, parsed as shell arguments."""
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, str(tmp_path), "3.12", uv_sync_args="--extra cpu --group dev")
+
+    backend.sync()
+
+    assert runner.calls == [
+        {
+            "args": ["uv", "sync", "--locked", "--extra", "cpu", "--group", "dev", "--python", "3.12"],
+            "cwd": str(tmp_path),
+        }
+    ]
+
+
+def test_uv_sync_args_default_is_all_groups_and_extras_without_conflicts(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+        """
+    )
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, str(tmp_path), "3.12")
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--all-groups",
+        "--all-extras",
+        "--python",
+        "3.12",
+    ]
+
+
+def test_uv_sync_falls_back_to_no_selection_when_conflicts_declared_and_no_args_given(
+    tmp_path, capsys
+):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [project.optional-dependencies]
+        cpu = ["idna"]
+        gpu = ["six"]
+
+        [tool.uv]
+        conflicts = [[{extra = "cpu"}, {extra = "gpu"}]]
+        """
+    )
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, str(tmp_path), "3.12")
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == ["uv", "sync", "--locked", "--python", "3.12"]
+    out = capsys.readouterr().out
+    assert "::warning::" in out
+    assert "uv-sync-args" in out
+
+
+def test_uv_sync_args_explicit_wins_even_with_conflicts_declared(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [tool.uv]
+        conflicts = [[{extra = "cpu"}, {extra = "gpu"}]]
+        """
+    )
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, str(tmp_path), "3.12", uv_sync_args="--extra cpu")
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == ["uv", "sync", "--locked", "--extra", "cpu", "--python", "3.12"]
+    assert "::warning::" not in capsys.readouterr().out
+
+
 def test_make_backend_returns_poetry_backend():
     class Cfg:
         directory = "."
         poetry_version = "2.1.3"
         python_version = "3.12.7"
+        uv_sync_args = ""
 
     backend = make_backend("poetry", FakeCommandRunner(), Cfg())
     assert isinstance(backend, PoetryBackend)
@@ -110,6 +201,7 @@ def test_make_backend_returns_uv_backend():
         directory = "."
         poetry_version = "2.1.3"
         python_version = "3.12.7"
+        uv_sync_args = ""
 
     backend = make_backend("uv", FakeCommandRunner(), Cfg())
     assert isinstance(backend, UvBackend)
@@ -120,6 +212,7 @@ def test_make_backend_raises_for_unknown_manager():
         directory = "."
         poetry_version = "2.1.3"
         python_version = "3.12.7"
+        uv_sync_args = ""
 
     with pytest.raises(ActionError):
         make_backend("pipenv", FakeCommandRunner(), Cfg())

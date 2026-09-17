@@ -23,10 +23,16 @@ def test_find_project_python_installs_then_finds():
         results=[result(True), result(True, stdout="/opt/python/3.12/bin/python3.12\n")]
     )
 
-    path = find_project_python(runner, "3.12")
+    path = find_project_python(runner, "3.12", "project/dir")
 
-    assert runner.calls[0]["args"] == ["uv", "python", "install", "3.12"]
-    assert runner.calls[1]["args"] == ["uv", "python", "find", "3.12", "--resolve-links"]
+    assert runner.calls[0] == {
+        "args": ["uv", "python", "install", "3.12"],
+        "cwd": "project/dir",
+    }
+    assert runner.calls[1] == {
+        "args": ["uv", "python", "find", "3.12", "--resolve-links"],
+        "cwd": "project/dir",
+    }
     assert path == "/opt/python/3.12/bin/python3.12"
 
 
@@ -34,14 +40,14 @@ def test_find_project_python_raises_when_install_fails():
     runner = FakeCommandRunner(results=[result(False, stderr="network error")])
 
     with pytest.raises(ActionError):
-        find_project_python(runner, "3.12")
+        find_project_python(runner, "3.12", "project/dir")
 
 
 def test_find_project_python_raises_when_find_fails():
     runner = FakeCommandRunner(results=[result(True), result(False, stderr="not found")])
 
     with pytest.raises(ActionError):
-        find_project_python(runner, "3.12")
+        find_project_python(runner, "3.12", "project/dir")
 
 
 def test_bootstrap_poetry_installs_tool_extends_path_and_sets_env(tmp_path):
@@ -57,14 +63,10 @@ def test_bootstrap_poetry_installs_tool_extends_path_and_sets_env(tmp_path):
 
     assert runner.calls[0]["args"] == ["uv", "tool", "install", "poetry==2.1.3"]
     assert runner.calls[1]["args"] == ["uv", "tool", "dir", "--bin"]
-    assert runner.calls[2]["args"] == [
-        "uv",
-        "venv",
-        "--python",
-        "/opt/python/3.12/bin/python3.12",
-        "--clear",
-        "project/dir/.venv",
-    ]
+    assert runner.calls[2] == {
+        "args": ["uv", "venv", "--python", "/opt/python/3.12/bin/python3.12", "--clear", ".venv"],
+        "cwd": "project/dir",
+    }
     assert str(tmp_path) in os.environ["PATH"].split(os.pathsep)
     assert os.environ["POETRY_VIRTUALENVS_IN_PROJECT"] == "true"
 

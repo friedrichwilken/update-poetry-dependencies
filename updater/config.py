@@ -76,6 +76,7 @@ class Config:
     python_version: str
     package_manager: str
     poetry_version: str
+    uv_sync_args: str
     directory: str
     pr_title_prefix: str
     pr_labels: str
@@ -101,6 +102,7 @@ class Config:
             python_version=get("PYTHON_VERSION"),
             package_manager=get("PACKAGE_MANAGER", "auto"),
             poetry_version=get("POETRY_VERSION"),
+            uv_sync_args=get("UV_SYNC_ARGS"),
             directory=get("DIRECTORY", "./"),
             pr_title_prefix=get("PR_TITLE_PREFIX"),
             pr_labels=get("PR_LABELS"),

@@ -31,11 +31,19 @@ def _run(runner: CommandRunner, args: list[str], cwd: str | None = None):
     return result
 
 
-def find_project_python(runner: CommandRunner, python_version: str) -> str:
+def find_project_python(runner: CommandRunner, python_version: str, directory: str) -> str:
     """Install (if needed) and locate the interpreter for `python_version`.
     Deliberately independent of the interpreter the updater itself runs
-    on (pinned to 3.14 by action.yml)."""
-    install_result = _run(runner, ["uv", "python", "install", python_version])
+    on (pinned to 3.14 by action.yml).
+
+    Run with `cwd=directory`: these are project-related lookups (uv also
+    considers the project's own `requires-python`/`.python-version` when
+    resolving a request), and running them from the action's default cwd
+    (the repository root) would print irrelevant warnings when `directory`
+    is a subdirectory of a monorepo whose own root `pyproject.toml` says
+    something different.
+    """
+    install_result = _run(runner, ["uv", "python", "install", python_version], cwd=directory)
     if not install_result.ok:
         raise ActionError(
             f"uv python install {python_version} failed: {install_result.stderr}"
@@ -48,7 +56,9 @@ def find_project_python(runner: CommandRunner, python_version: str) -> str:
     # been observed to mis-validate that symlinked path and silently fall
     # back to its own interpreter instead of raising - resolving it here
     # avoids relying on Poetry to handle the symlink correctly.
-    find_result = _run(runner, ["uv", "python", "find", python_version, "--resolve-links"])
+    find_result = _run(
+        runner, ["uv", "python", "find", python_version, "--resolve-links"], cwd=directory
+    )
     if not find_result.ok:
         raise ActionError(
             f"uv python find {python_version} failed: {find_result.stderr}"
@@ -103,6 +113,8 @@ def bootstrap_poetry(
     existing `.venv` in the project directory, so once `uv venv` has
     created it there is nothing left for Poetry to get wrong.
     """
+    # Not project-related (a global tool install into uv's own tool
+    # directory) - no cwd needed.
     install_result = _run(runner, ["uv", "tool", "install", f"poetry=={poetry_version}"])
     if not install_result.ok:
         raise ActionError(
@@ -113,16 +125,29 @@ def bootstrap_poetry(
     if bin_dir_result.ok:
         _prepend_to_path(bin_dir_result.stdout.strip())
 
-    # Equivalent to snok/install-poetry's virtualenvs-in-project: true;
-    # kept as a defensive default in case Poetry ever needs to create a
-    # venv itself (it otherwise never will - see above).
+    # Load-bearing, not just a nicety equivalent to snok/install-poetry's
+    # virtualenvs-in-project: true. A project-local poetry.toml can set
+    # virtualenvs.in-project = false, which takes precedence over Poetry's
+    # own global default and makes Poetry ignore an existing in-project
+    # .venv - including the one `uv venv` is about to create below -
+    # falling back to (or creating a new environment in) its central
+    # cache instead. This env var overrides that. It is also safe even
+    # when the consumer's poetry.toml additionally sets virtualenvs.create
+    # = false (disabling Poetry's own venv creation): by the time Poetry
+    # itself runs, later in the update loop, the venv already exists
+    # (created here by `uv venv`), so Poetry only ever needs to *use* it,
+    # never *create* it, and virtualenvs.create never comes into play.
     _set_env_var(POETRY_VIRTUALENVS_IN_PROJECT, "true")
 
-    venv_path = str(Path(directory) / VENV_DIR)
+    # Project-related: run from `directory` so uv's own compatibility
+    # checks (e.g. against `requires-python`) are against the actual
+    # project, not the action's default cwd (the repository root, which
+    # in a monorepo may have an unrelated root pyproject.toml).
     venv_result = _run(
-        runner, ["uv", "venv", "--python", project_python, "--clear", venv_path]
+        runner, ["uv", "venv", "--python", project_python, "--clear", VENV_DIR], cwd=directory
     )
     if not venv_result.ok:
+        venv_path = Path(directory) / VENV_DIR
         raise ActionError(
             f"uv venv --python {project_python} {venv_path} failed: {venv_result.stderr}"
         )
@@ -130,7 +155,7 @@ def bootstrap_poetry(
 
 def bootstrap(runner: CommandRunner, package_manager: str, directory: str, python_version: str, poetry_version: str) -> None:
     print("::group::bootstrapping project interpreter")
-    project_python = find_project_python(runner, python_version)
+    project_python = find_project_python(runner, python_version, directory)
     if package_manager == "poetry":
         bootstrap_poetry(runner, directory, poetry_version, project_python)
     print("::endgroup::")

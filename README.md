@@ -17,6 +17,13 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 
 The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv) and uses `uv` for everything else: it runs itself on a fixed `uv`-managed interpreter, installs the project's `python-version` with `uv python install`, and — for Poetry projects — installs Poetry itself with `uv tool install poetry==<poetry-version>` and creates its in-project virtualenv directly with `uv venv`, pinned to that interpreter (Poetry then picks up the existing virtualenv automatically). You do not need `actions/setup-python`, `snok/install-poetry`, or a preinstalled `uv`/`poetry` in your workflow; just check out the repository first.
 
+Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv` itself from a CI cache does nothing useful. If you want faster syncs, cache `uv`'s own package cache (e.g. `~/.cache/uv` on Linux/macOS, or `actions/cache` with `path: ~/.cache/uv` / the output of `uv cache dir`) instead.
+
+### uv backend: scope and limits
+
+- Only the `pyproject.toml` in `directory` is read to find top-level dependencies. A `tool.uv.workspace` root's member projects are not iterated, and workspace `uv.lock` files live at the workspace root rather than in an individual member's directory — [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) are not supported yet.
+- If the project declares [`tool.uv.conflicts`](https://docs.astral.sh/uv/concepts/projects/dependencies/#conflicting-dependencies) (mutually exclusive extras/groups, e.g. a `cpu`/`gpu` extra pair), the default `uv sync --all-groups --all-extras` selection would try to install both sides at once and `uv sync` fails outright. When that is detected and `uv-sync-args` is not set, the action falls back to `uv sync` with no extras and only the default dependency groups, and prints a `::warning::`. Set `uv-sync-args` to choose what actually gets installed, e.g. `uv-sync-args: '--extra cpu --group dev'`.
+
 ### Inputs
 
 | Name              | Description                                                                                   | Default                       | Required |
@@ -24,6 +31,7 @@ The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv
 | python-version    | The Python version to use for the project.                                                    | `3.12.7`                       | no       |
 | package-manager   | Which package manager the project uses: `auto` (detected from the lock file in `directory`), `poetry`, or `uv`. | `auto`                          | no       |
 | poetry-version    | The Poetry version to use. Only used when the poetry backend is selected.                     | `2.1.3`                        | no       |
+| uv-sync-args      | Only used when the uv backend is selected. Overrides the default `--all-groups --all-extras` selection passed to `uv sync` (parsed as shell arguments, e.g. `--extra cpu --group dev`). Needed when the project declares `tool.uv.conflicts`. | `""`                            | no       |
 | directory         | The directory of the project files.                                                            | `./`                            | no       |
 | pr-title-prefix   | A prefix for the PR title.                                                                     | `""`                            | no       |
 | pr-labels         | A comma or newline separated list of labels for the PR.                                        | `""`                            | no       |

@@ -48,6 +48,17 @@ def _is_vcs_path_or_workspace_source(sources: dict, name: str) -> bool:
     return any(isinstance(e, dict) and _SOURCE_KEYS & e.keys() for e in entries)
 
 
+def has_uv_conflicts(pyproject_path: Path) -> bool:
+    """True if `[tool.uv.conflicts]` declares at least one conflict set.
+
+    A non-empty `tool.uv.conflicts` means some extras/groups are mutually
+    exclusive, so unconditionally selecting all of them (`uv sync
+    --all-groups --all-extras`) fails outright - see `UvBackend`."""
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    conflicts = ((data.get("tool") or {}).get("uv") or {}).get("conflicts") or []
+    return bool(conflicts)
+
+
 def list_top_level_dependency_names(pyproject_path: Path) -> list[str]:
     """Return the sorted, deduplicated, PEP-503-normalized names of every
     top-level dependency declared anywhere in `pyproject_path`: base
