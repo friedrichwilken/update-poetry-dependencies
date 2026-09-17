@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from updater.runner import CommandRunner
+from updater.runner import MAX_CONSECUTIVE_READ_ERRORS, CommandRunner, _pump
 
 
 def _call_with_hang_guard(fn, timeout=10.0):
@@ -144,3 +144,24 @@ def test_run_shell_returns_once_the_shell_exits_even_with_a_backgrounded_grandch
     assert result.ok
     assert "hi" in result.stdout
     assert elapsed < 3.0
+
+
+def test_pump_gives_up_on_a_source_that_keeps_failing_instead_of_spinning_forever():
+    class BrokenSource:
+        def __init__(self):
+            self.reads = 0
+
+        def readline(self):
+            self.reads += 1
+            raise OSError("broken pipe")
+
+        def close(self):
+            pass
+
+    source = BrokenSource()
+    thread = threading.Thread(target=_pump, args=(source, sys.stdout, []), daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert source.reads == MAX_CONSECUTIVE_READ_ERRORS

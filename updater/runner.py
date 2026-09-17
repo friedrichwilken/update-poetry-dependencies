@@ -33,6 +33,10 @@ CAPTURED_LINES = 2000
 # background process.
 PUMP_JOIN_TIMEOUT = 1.0
 
+# How many times in a row reading from a pipe may raise before the pump
+# gives up on it instead of retrying forever.
+MAX_CONSECUTIVE_READ_ERRORS = 100
+
 
 @dataclass
 class CommandResult:
@@ -57,6 +61,7 @@ def _pump(source: TextIO, sink: TextIO, collected: deque) -> None:
     instead on the first bad line, the pipe would be left undrained and
     the child could block forever the next time it tries to write to it.
     """
+    read_errors = 0
     while True:
         try:
             line = source.readline()
@@ -64,8 +69,14 @@ def _pump(source: TextIO, sink: TextIO, collected: deque) -> None:
             # Not expected in practice - the pipe is opened with
             # errors="replace" (see run_shell), so decoding should not
             # raise - but if it ever does, keep looping rather than
-            # abandoning the pipe undrained.
+            # abandoning the pipe undrained. A persistent error (closed or
+            # broken pipe) would make this spin forever, so give up after
+            # a few consecutive failures.
+            read_errors += 1
+            if read_errors >= MAX_CONSECUTIVE_READ_ERRORS:
+                break
             continue
+        read_errors = 0
         if line == "":
             break
         try:
