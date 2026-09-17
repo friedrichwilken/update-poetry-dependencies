@@ -63,6 +63,24 @@ Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv
 | failed-packages   | Comma separated list of packages whose update or test failed and were discarded. |
 | skipped-packages  | Comma separated list of packages that had nothing to update.                |
 | pr-body           | The rendered report / PR body.                                              |
+| report-json       | JSON array of per-package records; see "Report" below for the field reference. |
+
+The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`.
+
+### Report
+
+The PR body / job summary reports, per package: for an update, the old and new locked version; for a failure, the current and attempted version, whether it was a dependency-resolution failure or a test failure, and a collapsed block with the tail of the relevant output (resolver output for a resolution failure, test command output for a test failure). Long output is truncated to keep the report well under GitHub's PR body size limit.
+
+`report-json` carries the same per-package data as a stable, machine-readable array, one object per top-level package:
+
+| Field          | Type            | Description                                                                 |
+|----------------|-----------------|-------------------------------------------------------------------------------|
+| name           | string          | The top-level package name.                                                 |
+| status         | string          | One of `updated`, `failed`, `skipped`.                                      |
+| old_version    | string \| null  | The version locked before this run touched the package, or `null` if unknown. |
+| new_version    | string \| null  | For `updated`/`skipped`: the resulting locked version. For `failed`: the version that was attempted before the change was reverted. `null` if unknown. |
+| failure_kind   | string \| null  | `resolution` (the update/lock step itself failed), `test` (the test command failed), or `null` for a non-failure. |
+| output_tail    | string          | Tail of the relevant captured output for a failure (empty otherwise), ANSI escape codes stripped. |
 
 ### Token and permissions
 

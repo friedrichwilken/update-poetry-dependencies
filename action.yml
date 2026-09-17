@@ -55,6 +55,9 @@ outputs:
   pr-body:
     description: 'The rendered report / PR body.'
     value: ${{ steps.update.outputs.pr-body }}
+  report-json:
+    description: 'JSON array of per-package update records, one object per top-level package: {name, status, old_version, new_version, failure_kind, output_tail}. status is one of "updated", "failed", "skipped"; failure_kind is "resolution", "test", or null.'
+    value: ${{ steps.update.outputs.report-json }}
 
 runs:
   using: "composite"

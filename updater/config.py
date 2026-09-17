@@ -90,6 +90,7 @@ class Config:
     repository: str
     run_id: str
     github_output: str
+    github_step_summary: str = ""
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> Config:
@@ -116,4 +117,5 @@ class Config:
             repository=get("GITHUB_REPOSITORY", ""),
             run_id=get("GITHUB_RUN_ID", ""),
             github_output=get("GITHUB_OUTPUT", ""),
+            github_step_summary=get("GITHUB_STEP_SUMMARY", ""),
         )

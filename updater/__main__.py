@@ -59,7 +59,7 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
 
     run_url = f"{cfg.server_url}/{cfg.repository}/actions/runs/{cfg.run_id}"
     body = render_body(result, run_url)
-    write_outputs(cfg.github_output, result, body)
+    write_outputs(cfg.github_output, result, body, cfg.github_step_summary)
     print(body)
 
     if cfg.dry_run:

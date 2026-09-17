@@ -25,6 +25,7 @@ def make_cfg(**overrides):
         repository="owner/repo",
         run_id="1",
         github_output="",
+        github_step_summary="",
     )
     base.update(overrides)
     return Config(**base)
@@ -164,3 +165,37 @@ def test_outputs_are_always_written_even_on_early_failure(tmp_path):
     assert "failed-packages=\n" in content
     assert "skipped-packages=\n" in content
     assert "pr-body<<" in content
+
+
+def test_job_summary_is_written_when_github_step_summary_is_set(tmp_path):
+    output_file = tmp_path / "output.txt"
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(
+        dry_run=True,
+        github_output=str(output_file),
+        github_step_summary=str(summary_file),
+    )
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    summary = summary_file.read_text()
+    assert "Workflow run:" in summary
+    assert "a" in summary
+
+
+def test_job_summary_is_written_even_in_dry_run(tmp_path):
+    """dry-run must not skip the job summary write - only the push/PR
+    steps are skipped."""
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(dry_run=True, github_step_summary=str(summary_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert summary_file.exists()
+    assert summary_file.read_text().strip() != ""
