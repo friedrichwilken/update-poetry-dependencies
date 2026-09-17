@@ -36,18 +36,32 @@ def test_parse_labels_only_whitespace_and_separators():
     assert parse_labels(" , \n , \n") == []
 
 
-def test_check_versions_accepts_supported_versions():
-    check_versions("3.12.7", "2.0.0")  # should not raise
+def test_check_versions_accepts_supported_poetry_versions():
+    check_versions("poetry", "3.12.7", "2.0.0")  # should not raise
 
 
-def test_check_versions_rejects_old_python():
+def test_check_versions_accepts_supported_uv_versions():
+    check_versions("uv", "3.12.7", "")  # should not raise; poetry-version is unused
+
+
+def test_check_versions_rejects_old_python_for_poetry():
     with pytest.raises(ActionError):
-        check_versions("3.9.0", "2.0.0")
+        check_versions("poetry", "3.9.0", "2.0.0")
 
 
 def test_check_versions_rejects_old_poetry():
     with pytest.raises(ActionError):
-        check_versions("3.12.7", "1.1.0")
+        check_versions("poetry", "3.12.7", "1.1.0")
+
+
+def test_check_versions_does_not_enforce_poetry_minimum_for_uv_backend():
+    check_versions("uv", "3.12.7", "0.0.1")  # should not raise; not a poetry run
+
+
+def test_check_versions_uv_backend_has_a_lower_python_floor_than_poetry():
+    with pytest.raises(ActionError):
+        check_versions("poetry", "3.9.5", "2.0.0")
+    check_versions("uv", "3.9.5", "")  # should not raise
 
 
 def test_resolve_base_branch_prefers_explicit_input():

@@ -1,0 +1,9 @@
+[project]
+name = "update-poetry-dependencies-uv-fixture"
+version = "0.1.0"
+description = "Fixture project for the update-poetry-dependencies action e2e test (uv backend)."
+requires-python = ">=3.10,<4.0"
+dependencies = [
+    "idna>=3.4,<4.0",
+    "six>=1.15.0,<2.0",
+]

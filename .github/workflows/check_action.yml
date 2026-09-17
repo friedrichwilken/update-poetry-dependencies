@@ -22,7 +22,7 @@ jobs:
       - name: Set up python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.14'
 
       - name: Install pytest
         run: python -m pip install pytest
@@ -31,6 +31,24 @@ jobs:
         run: python -m pytest tests/unit -q
 
   e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_manager: poetry
+            directory: tests/fixture/poetry
+            # Deliberately different from the updater's own pinned 3.14
+            # interpreter (see action.yml), to prove the project venv is
+            # wired up to the requested python-version and not the
+            # updater's.
+            python_version: '3.12'
+            test_command: 'poetry run python check.py'
+            venv_python_command: 'poetry run python --version'
+          - package_manager: uv
+            directory: tests/fixture/uv
+            python_version: '3.13'
+            test_command: 'uv run python check.py'
+            venv_python_command: 'uv run python --version'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,8 +58,10 @@ jobs:
         id: update
         uses: ./
         with:
-          directory: tests/fixture/poetry
-          test-command: 'poetry run python check.py'
+          python-version: ${{ matrix.python_version }}
+          package-manager: ${{ matrix.package_manager }}
+          directory: ${{ matrix.directory }}
+          test-command: ${{ matrix.test_command }}
           dry-run: 'true'
           github_token: ${{ github.token }}
 
@@ -71,8 +91,21 @@ jobs:
           exit $status
 
       - name: Verify the fixture environment is healthy after the run
-        working-directory: tests/fixture/poetry
-        run: poetry run python check.py
+        working-directory: ${{ matrix.directory }}
+        run: ${{ matrix.test_command }}
+
+      - name: Verify the project venv really runs the requested python-version
+        working-directory: ${{ matrix.directory }}
+        run: |
+          actual="$(${{ matrix.venv_python_command }})"
+          echo "project venv reports: $actual"
+          case "$actual" in
+            "Python ${{ matrix.python_version }}"*) ;;
+            *)
+              echo "expected project venv python to start with 'Python ${{ matrix.python_version }}', got '$actual'"
+              exit 1
+              ;;
+          esac
 
       - name: Verify no unexpected working tree changes
         run: |

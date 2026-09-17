@@ -3,8 +3,10 @@ from __future__ import annotations
 import sys
 import traceback
 
-from .backend import PoetryBackend
+from .backend import make_backend
+from .bootstrap import bootstrap
 from .config import Config, check_versions, parse_labels, resolve_base_branch
+from .detect import detect_package_manager
 from .errors import ActionError
 from .git_repo import GitRepo
 from .github_pr import GithubPR, create_or_edit
@@ -19,10 +21,16 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     # overrides this with real (or partial) data.
     write_outputs(cfg.github_output, UpdateResult(), "")
 
-    check_versions(cfg.python_version, cfg.poetry_version)
+    package_manager = detect_package_manager(cfg.directory, cfg.package_manager)
+    check_versions(package_manager, cfg.python_version, cfg.poetry_version)
 
     runner = runner or CommandRunner()
-    backend = backend or PoetryBackend(runner, cfg.directory, cfg.poetry_version)
+    if backend is None:
+        # Only for a real run (never in unit tests, which always inject a
+        # fake backend): provision the project interpreter, and Poetry
+        # itself if that is the selected backend, via uv.
+        bootstrap(runner, package_manager, cfg.directory, cfg.python_version, cfg.poetry_version)
+        backend = make_backend(package_manager, runner, cfg)
     git = git or GitRepo(runner, cfg.directory)
 
     # Resolve and validate the base branch before doing any work: a
@@ -39,7 +47,7 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     print(install_result.stderr)
     print("::endgroup::")
     if not install_result.ok:
-        raise ActionError("poetry install failed")
+        raise ActionError(f"{package_manager} install failed")
 
     packages = backend.list_top_level_packages()
     print(f"top level packages: {', '.join(packages) or '(none)'}")

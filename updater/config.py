@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from .errors import ActionError
 from .versions import version_at_least
 
-MIN_PYTHON_VERSION = "3.10"
+# The minimum *project* python-version accepted for each backend. Poetry's
+# floor tracks poetry-core's own support window; uv supports much older
+# interpreters, so a uv project should not be blocked on Poetry's minimum.
+MIN_PROJECT_PYTHON_VERSION = {
+    "poetry": "3.10",
+    "uv": "3.9",
+}
 MIN_POETRY_VERSION = "1.2"
 
 _TRUE_VALUES = {"true", "1", "yes"}
@@ -25,13 +31,16 @@ def parse_labels(raw: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def check_versions(python_version: str, poetry_version: str) -> None:
-    if not version_at_least(python_version, MIN_PYTHON_VERSION):
+def check_versions(package_manager: str, python_version: str, poetry_version: str) -> None:
+    # package_manager is expected to already be resolved to "poetry" or
+    # "uv" by detect_package_manager() before this is called.
+    minimum = MIN_PROJECT_PYTHON_VERSION[package_manager]
+    if not version_at_least(python_version, minimum):
         raise ActionError(
             f"python-version {python_version} is below the minimum required "
-            f"version {MIN_PYTHON_VERSION}"
+            f"version {minimum} for the {package_manager} backend"
         )
-    if not version_at_least(poetry_version, MIN_POETRY_VERSION):
+    if package_manager == "poetry" and not version_at_least(poetry_version, MIN_POETRY_VERSION):
         raise ActionError(
             f"poetry-version {poetry_version} is below the minimum required "
             f"version {MIN_POETRY_VERSION}"
@@ -65,7 +74,9 @@ def resolve_base_branch(explicit: str, current_branch: str, github_base_ref: str
 @dataclass
 class Config:
     python_version: str
+    package_manager: str
     poetry_version: str
+    uv_sync_args: str
     directory: str
     pr_title_prefix: str
     pr_labels: str
@@ -89,7 +100,9 @@ class Config:
 
         return cls(
             python_version=get("PYTHON_VERSION"),
+            package_manager=get("PACKAGE_MANAGER", "auto"),
             poetry_version=get("POETRY_VERSION"),
+            uv_sync_args=get("UV_SYNC_ARGS"),
             directory=get("DIRECTORY", "./"),
             pr_title_prefix=get("PR_TITLE_PREFIX"),
             pr_labels=get("PR_LABELS"),

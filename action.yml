@@ -1,13 +1,19 @@
 name: 'update poetry dependencies'
-description: 'Runs `poetry update` for each package and creates a PR.'
+description: 'Updates your Poetry or uv dependencies one top-level package at a time, testing each update, and creates a pull request with the results.'
 author: 'Friedrich Wilken'
 inputs:
   python-version:
-    description: "The python version to use with poetry."
+    description: "The Python version to use for the project."
     default: '3.12.7'
+  package-manager:
+    description: "Which package manager the project uses: 'auto' (detected from the lock file present in `directory`), 'poetry', or 'uv'."
+    default: 'auto'
   poetry-version:
-    description: "The poetry version to use."
+    description: "The Poetry version to use. Only used when the poetry backend is selected."
     default: '2.1.3'
+  uv-sync-args:
+    description: "Only used when the uv backend is selected. Overrides the default `--all-groups --all-extras` group/extra selection passed to `uv sync` (parsed as shell arguments, e.g. '--extra cpu --group dev'). Needed when the project declares `tool.uv.conflicts`, since `--all-groups --all-extras` would otherwise try to select mutually exclusive extras/groups and `uv sync` would fail outright."
+    default: ''
   directory:
     description: "The directory of the project files."
     default: './'
@@ -50,25 +56,17 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ inputs.python-version }}
-
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: ${{ inputs.poetry-version }}
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-        installer-parallel: true
+    - name: Install uv
+      uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
 
     - name: Update and test packages
       id: update
       shell: bash
       env:
         PYTHON_VERSION: ${{ inputs.python-version }}
+        PACKAGE_MANAGER: ${{ inputs.package-manager }}
         POETRY_VERSION: ${{ inputs.poetry-version }}
+        UV_SYNC_ARGS: ${{ inputs.uv-sync-args }}
         DIRECTORY: ${{ inputs.directory }}
         PR_TITLE_PREFIX: ${{ inputs.pr-title-prefix }}
         PR_LABELS: ${{ inputs.pr-labels }}
@@ -78,4 +76,11 @@ runs:
         DRY_RUN: ${{ inputs.dry-run }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        PYTHONPATH="$GITHUB_ACTION_PATH" python -m updater
+        # The updater itself always runs on a fixed, pinned interpreter
+        # (independent of the project's own python-version input) so that
+        # e.g. tomllib is always available; --no-project keeps `uv run`
+        # from trying to discover/sync the caller's checked-out project as
+        # if it were the updater's own project. All the branching between
+        # backends (which interpreter/tools to provision for the project)
+        # happens in Python - see updater/bootstrap.py.
+        PYTHONPATH="$GITHUB_ACTION_PATH" uv run --no-project --python 3.14 -m updater
