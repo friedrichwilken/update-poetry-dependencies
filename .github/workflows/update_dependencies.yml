@@ -1,0 +1,33 @@
+name: update dependencies
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.DEPS_UPDATE_TOKEN || github.token }}
+
+      - name: Ensure the pr-labels used below exist
+        env:
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN || github.token }}
+        run: gh label create dependencies --color 0366d6 --description "Dependency updates" --force
+
+      - name: Update this repo's own dependencies
+        uses: ./
+        with:
+          python-version: '3.14'
+          package-manager: 'uv'
+          directory: './'
+          test-command: 'uv run pytest tests/unit && uv run ruff check .'
+          pr-labels: 'dependencies'
+          github_token: ${{ secrets.DEPS_UPDATE_TOKEN || github.token }}
