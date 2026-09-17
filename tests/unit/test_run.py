@@ -9,6 +9,7 @@ from updater.errors import ActionError
 def make_cfg(**overrides):
     base = dict(
         python_version="3.12.7",
+        package_manager="poetry",
         poetry_version="2.0.0",
         directory=".",
         pr_title_prefix="",

@@ -13,15 +13,21 @@ def result(ok: bool = True, stdout: str = "", stderr: str = "") -> CommandResult
 
 
 class FakeBackend:
+    """Duck-typed stand-in for any `Backend` (Poetry or uv). The lock file
+    name defaults to poetry.lock but is overridable so tests can prove the
+    update loop in `updater.py` never special-cases either backend."""
+
     def __init__(
         self,
         update_ok: dict | None = None,
         lock_exists: bool = True,
         sync_ok: bool = True,
+        lock_file: str = "poetry.lock",
     ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
         self._sync_ok = sync_ok
+        self.lock_file = lock_file
         self.updated_packages: list[str] = []
         self.sync_calls = 0
         self.install_calls = 0
@@ -30,10 +36,10 @@ class FakeBackend:
         return self._lock_exists
 
     def lock_file_path(self):
-        return "poetry.lock"
+        return self.lock_file
 
     def files_to_stage(self) -> list[str]:
-        return ["poetry.lock"]
+        return [self.lock_file]
 
     def install(self) -> CommandResult:
         self.install_calls += 1
@@ -98,6 +104,23 @@ class FakeGit:
 
     def push(self, branch: str) -> CommandResult:
         self.push_branches.append(branch)
+        return result(True)
+
+
+class FakeCommandRunner:
+    """General purpose fake for `CommandRunner.run()`, used wherever a test
+    exercises something other than the update loop's shell test-command
+    (bootstrap, a backend's own commands). Results are consumed in call
+    order; once exhausted, a successful empty result is returned."""
+
+    def __init__(self, results: list | None = None):
+        self._results = list(results or [])
+        self.calls: list[dict] = []
+
+    def run(self, args: list, cwd=None) -> CommandResult:
+        self.calls.append({"args": list(args), "cwd": cwd})
+        if self._results:
+            return self._results.pop(0)
         return result(True)
 
 

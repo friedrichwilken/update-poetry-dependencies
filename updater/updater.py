@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .backend import PoetryBackend
+from .backend import Backend
 from .errors import ActionError
 from .git_repo import GitRepo
 from .runner import CommandRunner
@@ -15,7 +15,7 @@ class UpdateResult:
     skipped: list = field(default_factory=list)
 
 
-def _reset_and_resync(backend: PoetryBackend, git: GitRepo, files: list[str], package: str) -> None:
+def _reset_and_resync(backend: Backend, git: GitRepo, files: list[str], package: str) -> None:
     """Discard the lock file change for `package` and re-sync the
     environment to it. If the re-sync itself fails, the environment is left
     in an unknown state and it is not safe to keep testing later packages
@@ -34,7 +34,7 @@ def _reset_and_resync(backend: PoetryBackend, git: GitRepo, files: list[str], pa
 
 
 def run_updates(
-    backend: PoetryBackend,
+    backend: Backend,
     git: GitRepo,
     runner: CommandRunner,
     packages: list[str],

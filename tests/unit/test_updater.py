@@ -105,6 +105,20 @@ def test_failed_resync_after_test_failure_aborts_the_run():
     assert backend.updated_packages == ["a"]
 
 
+def test_run_updates_is_backend_agnostic_and_stages_whatever_lock_file_the_backend_reports():
+    """The update loop must not know or care which backend it is driving:
+    a uv-flavoured backend (uv.lock instead of poetry.lock) goes through
+    exactly the same path as the Poetry one."""
+    backend = FakeBackend(update_ok={"idna": True}, lock_file="uv.lock")
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+
+    res = run_updates(backend, git, runner, ["idna"], "", "dir")
+
+    assert res.passed == ["idna"]
+    assert git.staged_calls == [["uv.lock"]]
+
+
 def test_test_command_runs_in_project_directory():
     backend = FakeBackend(update_ok={"a": True})
     git = FakeGit(diff_results=[True])
