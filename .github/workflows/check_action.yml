@@ -69,3 +69,16 @@ jobs:
           fi
 
           exit $status
+
+      - name: Verify the fixture environment is healthy after the run
+        working-directory: tests/fixture/poetry
+        run: poetry run python check.py
+
+      - name: Verify no unexpected working tree changes
+        run: |
+          changes="$(git status --porcelain)"
+          if [ -n "$changes" ]; then
+            echo "unexpected working tree changes after a dry-run:"
+            echo "$changes"
+            exit 1
+          fi
