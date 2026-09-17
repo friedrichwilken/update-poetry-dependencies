@@ -10,10 +10,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Lint `action.yml`
+      - name: Lint workflows and action.yml
         uses: raven-actions/actionlint@v2
-        with:
-          files: "action.yml"
 
   unit-tests:
     runs-on: ubuntu-latest
