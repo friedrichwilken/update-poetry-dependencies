@@ -49,7 +49,7 @@ def test_bootstrap_poetry_installs_tool_extends_path_and_sets_env(tmp_path):
         results=[
             result(True),  # uv tool install poetry==...
             result(True, stdout=str(tmp_path) + "\n"),  # uv tool dir --bin
-            result(True),  # poetry env use
+            result(True),  # uv venv
         ]
     )
 
@@ -58,12 +58,13 @@ def test_bootstrap_poetry_installs_tool_extends_path_and_sets_env(tmp_path):
     assert runner.calls[0]["args"] == ["uv", "tool", "install", "poetry==2.1.3"]
     assert runner.calls[1]["args"] == ["uv", "tool", "dir", "--bin"]
     assert runner.calls[2]["args"] == [
-        "poetry",
-        "env",
-        "use",
+        "uv",
+        "venv",
+        "--python",
         "/opt/python/3.12/bin/python3.12",
+        "--clear",
+        "project/dir/.venv",
     ]
-    assert runner.calls[2]["cwd"] == "project/dir"
     assert str(tmp_path) in os.environ["PATH"].split(os.pathsep)
     assert os.environ["POETRY_VIRTUALENVS_IN_PROJECT"] == "true"
 
@@ -102,7 +103,7 @@ def test_bootstrap_poetry_raises_when_tool_install_fails():
         bootstrap_poetry(runner, "project/dir", "2.1.3", "/opt/python/3.12/bin/python3.12")
 
 
-def test_bootstrap_poetry_raises_when_env_use_fails(tmp_path):
+def test_bootstrap_poetry_raises_when_uv_venv_fails(tmp_path):
     runner = FakeCommandRunner(
         results=[
             result(True),
@@ -137,7 +138,7 @@ def test_bootstrap_installs_poetry_for_the_poetry_backend():
             result(True, stdout="/opt/python/3.12/bin/python3.12\n"),  # uv python find
             result(True),  # uv tool install poetry
             result(True, stdout="/opt/uv/bin\n"),  # uv tool dir --bin
-            result(True),  # poetry env use
+            result(True),  # uv venv
         ]
     )
 

@@ -15,11 +15,13 @@ a fake backend and so never need a fake `uv`/`poetry` on PATH).
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from .errors import ActionError
 from .runner import CommandRunner
 
 POETRY_VIRTUALENVS_IN_PROJECT = "POETRY_VIRTUALENVS_IN_PROJECT"
+VENV_DIR = ".venv"
 
 
 def _run(runner: CommandRunner, args: list[str], cwd: str | None = None):
@@ -87,9 +89,20 @@ def bootstrap_poetry(
     runner: CommandRunner, directory: str, poetry_version: str, project_python: str
 ) -> None:
     """Install Poetry as a `uv` tool (isolated from the project's own
-    dependencies) and point it at the project interpreter explicitly, so it
-    never falls back to uv's own tool interpreter or whatever `python`
-    happens to resolve to on PATH."""
+    dependencies) and create its in-project venv ourselves, with `uv venv`,
+    pinned to the project interpreter explicitly.
+
+    This deliberately does not use `poetry env use <path>` to select the
+    interpreter (as issue #20 originally suggested): on Linux CI runners
+    that command was observed to silently create the venv against
+    Poetry's own tool interpreter instead of the given path - no error,
+    just a wrong, unversioned virtualenv - while working correctly
+    locally. `uv venv` doing the creation is both more reliable (we
+    already trust `uv`'s own interpreter resolution, since it just found
+    this exact path) and simpler: Poetry unconditionally picks up an
+    existing `.venv` in the project directory, so once `uv venv` has
+    created it there is nothing left for Poetry to get wrong.
+    """
     install_result = _run(runner, ["uv", "tool", "install", f"poetry=={poetry_version}"])
     if not install_result.ok:
         raise ActionError(
@@ -100,13 +113,18 @@ def bootstrap_poetry(
     if bin_dir_result.ok:
         _prepend_to_path(bin_dir_result.stdout.strip())
 
-    # Equivalent to snok/install-poetry's virtualenvs-in-project: true.
+    # Equivalent to snok/install-poetry's virtualenvs-in-project: true;
+    # kept as a defensive default in case Poetry ever needs to create a
+    # venv itself (it otherwise never will - see above).
     _set_env_var(POETRY_VIRTUALENVS_IN_PROJECT, "true")
 
-    env_use_result = _run(runner, ["poetry", "env", "use", project_python], cwd=directory)
-    if not env_use_result.ok:
+    venv_path = str(Path(directory) / VENV_DIR)
+    venv_result = _run(
+        runner, ["uv", "venv", "--python", project_python, "--clear", venv_path]
+    )
+    if not venv_result.ok:
         raise ActionError(
-            f"poetry env use {project_python} failed: {env_use_result.stderr}"
+            f"uv venv --python {project_python} {venv_path} failed: {venv_result.stderr}"
         )
 
 
