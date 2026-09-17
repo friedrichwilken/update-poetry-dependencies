@@ -1,16 +1,84 @@
-name: 'check action'
+name: check action
 on:
   pull_request:
     branches: [main]
 
 jobs:
-  release:
+  actionlint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Lint `action.yml`
+      - name: Lint workflows and action.yml
         uses: raven-actions/actionlint@v2
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up python
+        uses: actions/setup-python@v5
         with:
-          files: "action.yml"
+          python-version: '3.12'
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit -q
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run action against fixture project (dry-run)
+        id: update
+        uses: ./
+        with:
+          directory: tests/fixture/poetry
+          test-command: 'poetry run python check.py'
+          dry-run: 'true'
+          github_token: ${{ github.token }}
+
+      - name: Assert reported outputs
+        env:
+          PASSED: ${{ steps.update.outputs.passed-packages }}
+          FAILED: ${{ steps.update.outputs.failed-packages }}
+          SKIPPED: ${{ steps.update.outputs.skipped-packages }}
+        run: |
+          status=0
+
+          if [ "$PASSED" != "six" ]; then
+            echo "expected passed-packages=six, got '$PASSED'"
+            status=1
+          fi
+
+          if [ "$FAILED" != "idna" ]; then
+            echo "expected failed-packages=idna, got '$FAILED'"
+            status=1
+          fi
+
+          if [ -n "$SKIPPED" ]; then
+            echo "expected skipped-packages to be empty, got '$SKIPPED'"
+            status=1
+          fi
+
+          exit $status
+
+      - name: Verify the fixture environment is healthy after the run
+        working-directory: tests/fixture/poetry
+        run: poetry run python check.py
+
+      - name: Verify no unexpected working tree changes
+        run: |
+          changes="$(git status --porcelain)"
+          if [ -n "$changes" ]; then
+            echo "unexpected working tree changes after a dry-run:"
+            echo "$changes"
+            exit 1
+          fi
