@@ -26,7 +26,7 @@ def test_find_project_python_installs_then_finds():
     path = find_project_python(runner, "3.12")
 
     assert runner.calls[0]["args"] == ["uv", "python", "install", "3.12"]
-    assert runner.calls[1]["args"] == ["uv", "python", "find", "3.12"]
+    assert runner.calls[1]["args"] == ["uv", "python", "find", "3.12", "--resolve-links"]
     assert path == "/opt/python/3.12/bin/python3.12"
 
 
@@ -127,7 +127,7 @@ def test_bootstrap_only_installs_poetry_for_the_poetry_backend():
 
     assert len(runner.calls) == 2
     assert runner.calls[0]["args"] == ["uv", "python", "install", "3.12"]
-    assert runner.calls[1]["args"] == ["uv", "python", "find", "3.12"]
+    assert runner.calls[1]["args"] == ["uv", "python", "find", "3.12", "--resolve-links"]
 
 
 def test_bootstrap_installs_poetry_for_the_poetry_backend():

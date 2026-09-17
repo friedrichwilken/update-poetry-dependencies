@@ -39,7 +39,14 @@ def find_project_python(runner: CommandRunner, python_version: str) -> str:
             f"uv python install {python_version} failed: {install_result.stderr}"
         )
 
-    find_result = _run(runner, ["uv", "python", "find", python_version])
+    # --resolve-links: `uv python find` otherwise returns a path through
+    # uv's "generic minor version" symlink (e.g. .../cpython-3.12-.../bin/
+    # python3.12) rather than the real, patch-versioned install directory.
+    # Poetry's own interpreter discovery (the findpython dependency) has
+    # been observed to mis-validate that symlinked path and silently fall
+    # back to its own interpreter instead of raising - resolving it here
+    # avoids relying on Poetry to handle the symlink correctly.
+    find_result = _run(runner, ["uv", "python", "find", python_version, "--resolve-links"])
     if not find_result.ok:
         raise ActionError(
             f"uv python find {python_version} failed: {find_result.stderr}"
