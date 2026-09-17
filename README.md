@@ -13,6 +13,20 @@ This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzyla
 5. Reuses a fixed branch/PR across runs instead of piling up duplicate PRs.
 6. `dry-run` mode to see what would happen without pushing anything.
 
+### Versions
+
+- **`v2`** (this branch/version) is a breaking Python rewrite with uv support, a new bootstrap (see below), and new inputs/outputs. It is **not released yet**: the `v2`/`v2.0.0` tags only start existing once the maintainer pushes the first `v2.0.0` tag (see [`release.yml`](.github/workflows/release.yml)). Until then, pin to `@main` (moves with the default branch) or, for a reproducible/supply-chain-hardened pin, a full commit SHA — `friedrichwilken/update-poetry-dependencies@<sha>  # describe the commit`, the same pattern this repo's own workflows use for third-party actions.
+- **`v1`** is the original bash-based action. It is frozen at the `v1`/`v1.0.1` tags and unmaintained — it will not be moved or updated further. If you're still using it, see "Migrating from v1" below.
+
+### Migrating from v1
+
+`v2` is a breaking rewrite: Python instead of bash, `uv`-based bootstrapping, and some input/output changes. To migrate:
+
+1. Add an explicit `actions/checkout` step before this action in your workflow — v1 checked out the repository itself; v2 does not.
+2. Pass your token to **both** `actions/checkout`'s `token:` input and this action's `github_token` input (see "Token and permissions" below) — v1 only needed `github_token`.
+3. Check the [Inputs](#inputs) and [Outputs](#outputs) tables against your existing `with:` block — some defaults changed (e.g. `poetry-version` now defaults to a Poetry 2.x release) and `package-manager` is new (for uv support; defaults to `auto`-detecting from the lock file).
+4. Drop any `actions/setup-python` / `snok/install-poetry` steps you had before this action — v2's `uv`-based bootstrap replaces them entirely; see "How it bootstraps" below.
+
 ### How it bootstraps
 
 The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv) and uses `uv` for everything else: it runs itself on a fixed `uv`-managed interpreter, installs the project's `python-version` with `uv python install`, and — for Poetry projects — installs Poetry itself with `uv tool install poetry==<poetry-version>` and creates its in-project virtualenv directly with `uv venv`, pinned to that interpreter (Poetry then picks up the existing virtualenv automatically). You do not need `actions/setup-python`, `snok/install-poetry`, or a preinstalled `uv`/`poetry` in your workflow; just check out the repository first.
@@ -70,7 +84,7 @@ That token has to be passed in **two** places, because two different things auth
   with:
     token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
-- uses: friedrichwilken/update-poetry-dependencies@v1
+- uses: friedrichwilken/update-poetry-dependencies@v2 # see "Versions" above - not released yet, pin to @main or a SHA until v2.0.0 exists
   with:
     github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
     # ... other inputs
@@ -90,7 +104,7 @@ Either way, the repository setting **Settings → Actions → General → Workfl
 
 The action no longer checks out the repository itself — do that in the calling workflow before using it. `package-manager` defaults to `auto`, so it usually does not need to be set explicitly.
 
-These examples pin to the `v1` major tag, which the [release workflow](.github/workflows/release.yml) moves to point at the latest `v1.x.y` release. For a supply-chain-hardened pin, use a full commit SHA instead (`friedrichwilken/update-poetry-dependencies@<sha>  # v1.x.y`) — see how this repo's own workflows pin their third-party actions for the pattern.
+These examples pin to the `v2` major tag, which the [release workflow](.github/workflows/release.yml) will move to point at the latest `v2.x.y` release — **but see "Versions" above: `v2` does not exist yet.** Until the first `v2.0.0` tag is pushed, pin to `@main` or a full commit SHA instead (`friedrichwilken/update-poetry-dependencies@<sha>  # describe the commit`) — see how this repo's own workflows pin their third-party actions for the pattern.
 
 This repository dogfoods the action on itself; see [`.github/workflows/update_dependencies.yml`](.github/workflows/update_dependencies.yml) for a complete, currently-running example (uv backend).
 
@@ -107,6 +121,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -115,7 +133,7 @@ jobs:
         with:
           token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
-      - uses: friedrichwilken/update-poetry-dependencies@v1
+      - uses: friedrichwilken/update-poetry-dependencies@v2 # not released yet - pin to @main or a SHA, see "Versions" above
         with:
           python-version: '3.12.14'
           poetry-version: '2.4.3'
@@ -140,6 +158,10 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -148,7 +170,7 @@ jobs:
         with:
           token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
-      - uses: friedrichwilken/update-poetry-dependencies@v1
+      - uses: friedrichwilken/update-poetry-dependencies@v2 # not released yet - pin to @main or a SHA, see "Versions" above
         with:
           python-version: '3.12.14'
           package-manager: 'uv'
@@ -159,3 +181,11 @@ jobs:
           branch-name: 'deps/test-gated-updates'
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
+
+### Maintaining this repo
+
+Notes for whoever maintains `friedrichwilken/update-poetry-dependencies` itself (not relevant to consumers of the action):
+
+- [`dependabot_automerge.yml`](.github/workflows/dependabot_automerge.yml) only actually enables auto-merge on a Dependabot PR if the repository setting **Settings → General → Pull Requests → "Allow auto-merge"** is on; if it's off, the workflow prints a `::warning::` and exits cleanly instead of failing.
+- [`update_dependencies.yml`](.github/workflows/update_dependencies.yml) needs a `DEPS_UPDATE_TOKEN` secret (see "Token and permissions" above) to get CI running on the PRs it opens; it falls back to `github.token` otherwise.
+- [`release.yml`](.github/workflows/release.yml) only reacts to a pushed `vX.Y.Z` tag and only ever force-moves the major tag matching that same `X` — pushing a `v2.0.0` tag is what turns on `v2` for the first time.
