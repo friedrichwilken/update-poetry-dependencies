@@ -1,0 +1,19 @@
+[project]
+name = "update-poetry-dependencies-dev"
+version = "0.0.0"
+description = "Dev tooling only - this repo is not a distributable package. The action itself is a stdlib-only script run via `uv run --no-project` (see action.yml); this file only pins pytest/ruff for local dev and CI."
+requires-python = ">=3.14"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["tests/fixture"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
