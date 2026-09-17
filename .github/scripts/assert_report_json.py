@@ -1,9 +1,21 @@
 """e2e-only assertion helper for `check_action.yml`: verifies the shape of
-the `report-json` output against the fixture project's known outcome
-(idna fails its test, six updates cleanly - see `tests/fixture/*/check.py`
-for why). Not part of the action package itself, not covered by the
-`ruff` extend-exclude for `tests/fixture`, so it is written to the same
+the `report-json` output against a fixture project's known outcome. Not
+part of the action package itself, not covered by the `ruff`
+extend-exclude for `tests/fixture`, so it is written to the same
 lint/format standard as `updater/`.
+
+Parametrized by the `SCENARIO` env var so both e2e fixture families share
+this one script rather than each getting their own inline assertion
+block:
+
+- "basic" (the default, `tests/fixture/poetry`/`tests/fixture/uv`): idna
+  fails its test, six updates cleanly - see those fixtures' `check.py`
+  for why.
+- "major" (`tests/fixture/poetry-major`/`tests/fixture/uv-major`, run
+  with `allow-major: 'true'`): zipp's major bump passes and is committed
+  with `bump: "major"`; charset-normalizer's major bump fails the test
+  command and is held back, falling back to a passing in-range update -
+  see those fixtures' `check.py` for why.
 """
 
 from __future__ import annotations
@@ -13,18 +25,7 @@ import os
 import sys
 
 
-def main() -> int:
-    records = json.loads(os.environ["REPORT_JSON"])
-    by_name = {record["name"]: record for record in records}
-
-    status = 0
-
-    def check(condition: bool, message: str) -> None:
-        nonlocal status
-        if not condition:
-            print(f"report-json assertion failed: {message}")
-            status = 1
-
+def check_basic(by_name: dict, check) -> None:
     check("idna" in by_name, "expected an idna record")
     check("six" in by_name, "expected a six record")
 
@@ -36,6 +37,7 @@ def main() -> int:
     )
     check(bool(idna.get("old_version")), "idna old_version should be non-empty")
     check(bool(idna.get("new_version")), "idna new_version (attempted) should be non-empty")
+    check("bump" not in idna, "idna should have no bump field (allow-major not used)")
 
     six = by_name.get("six", {})
     check(six.get("status") == "updated", f"six status: {six.get('status')!r}")
@@ -45,6 +47,70 @@ def main() -> int:
         six.get("old_version") != six.get("new_version"),
         f"six old_version == new_version: {six.get('old_version')!r}",
     )
+    check("bump" not in six, "six should have no bump field (allow-major not used)")
+
+
+def check_major(by_name: dict, check) -> None:
+    check("zipp" in by_name, "expected a zipp record")
+    check("charset-normalizer" in by_name, "expected a charset-normalizer record")
+
+    zipp = by_name.get("zipp", {})
+    check(zipp.get("status") == "updated", f"zipp status: {zipp.get('status')!r}")
+    check(zipp.get("bump") == "major", f"zipp bump: {zipp.get('bump')!r}")
+    check(bool(zipp.get("old_version")), "zipp old_version should be non-empty")
+    check(bool(zipp.get("new_version")), "zipp new_version should be non-empty")
+    check(
+        zipp.get("old_version") != zipp.get("new_version"),
+        f"zipp old_version == new_version: {zipp.get('old_version')!r}",
+    )
+    check(
+        zipp.get("major_attempted_version") is None,
+        "zipp should have no held-back major attempt - its own bump *is* the major one",
+    )
+
+    cn = by_name.get("charset-normalizer", {})
+    check(cn.get("status") == "updated", f"charset-normalizer status: {cn.get('status')!r}")
+    check(
+        cn.get("failure_kind") is None,
+        f"charset-normalizer failure_kind: {cn.get('failure_kind')!r}",
+    )
+    check("bump" not in cn, "charset-normalizer's own update should not be tagged as a major bump")
+    check(
+        bool(cn.get("major_attempted_version")),
+        "charset-normalizer should report a held-back major_attempted_version",
+    )
+    check(
+        cn.get("major_failure_kind") == "test",
+        f"charset-normalizer major_failure_kind: {cn.get('major_failure_kind')!r}",
+    )
+    check(
+        bool(cn.get("major_output_tail")),
+        "charset-normalizer should carry the held-back attempt's captured output",
+    )
+    check(
+        cn.get("old_version") != cn.get("new_version"),
+        "charset-normalizer should still have moved forward in-range "
+        f"(old={cn.get('old_version')!r}, new={cn.get('new_version')!r})",
+    )
+
+
+SCENARIOS = {"basic": check_basic, "major": check_major}
+
+
+def main() -> int:
+    scenario = os.environ.get("SCENARIO", "basic")
+    records = json.loads(os.environ["REPORT_JSON"])
+    by_name = {record["name"]: record for record in records}
+
+    status = 0
+
+    def check(condition: bool, message: str) -> None:
+        nonlocal status
+        if not condition:
+            print(f"report-json assertion failed: {message}")
+            status = 1
+
+    SCENARIOS[scenario](by_name, check)
 
     return status
 
