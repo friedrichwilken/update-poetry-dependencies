@@ -45,9 +45,7 @@ def find_project_python(runner: CommandRunner, python_version: str, directory: s
     """
     install_result = _run(runner, ["uv", "python", "install", python_version], cwd=directory)
     if not install_result.ok:
-        raise ActionError(
-            f"uv python install {python_version} failed: {install_result.stderr}"
-        )
+        raise ActionError(f"uv python install {python_version} failed: {install_result.stderr}")
 
     # --resolve-links: `uv python find` otherwise returns a path through
     # uv's "generic minor version" symlink (e.g. .../cpython-3.12-.../bin/
@@ -60,9 +58,7 @@ def find_project_python(runner: CommandRunner, python_version: str, directory: s
         runner, ["uv", "python", "find", python_version, "--resolve-links"], cwd=directory
     )
     if not find_result.ok:
-        raise ActionError(
-            f"uv python find {python_version} failed: {find_result.stderr}"
-        )
+        raise ActionError(f"uv python find {python_version} failed: {find_result.stderr}")
     return find_result.stdout.strip()
 
 
@@ -153,7 +149,13 @@ def bootstrap_poetry(
         )
 
 
-def bootstrap(runner: CommandRunner, package_manager: str, directory: str, python_version: str, poetry_version: str) -> None:
+def bootstrap(
+    runner: CommandRunner,
+    package_manager: str,
+    directory: str,
+    python_version: str,
+    poetry_version: str,
+) -> None:
     print("::group::bootstrapping project interpreter")
     project_python = find_project_python(runner, python_version, directory)
     if package_manager == "poetry":

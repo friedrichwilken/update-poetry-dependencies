@@ -36,9 +36,7 @@ def test_create_or_edit_edits_when_open_pr_exists():
     existing, _ = create_or_edit(gh, "deps/branch", "title", "body", "main", [])
 
     assert existing == 42
-    assert gh.edit_calls == [
-        {"number": 42, "title": "title", "body": "body", "labels": []}
-    ]
+    assert gh.edit_calls == [{"number": 42, "title": "title", "body": "body", "labels": []}]
     assert gh.create_calls == []
 
 

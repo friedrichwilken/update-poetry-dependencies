@@ -107,7 +107,17 @@ def test_uv_sync_args_replaces_the_default_selection(tmp_path):
 
     assert runner.calls == [
         {
-            "args": ["uv", "sync", "--locked", "--extra", "cpu", "--group", "dev", "--python", "3.12"],
+            "args": [
+                "uv",
+                "sync",
+                "--locked",
+                "--extra",
+                "cpu",
+                "--group",
+                "dev",
+                "--python",
+                "3.12",
+            ],
             "cwd": str(tmp_path),
         }
     ]
@@ -181,7 +191,15 @@ def test_uv_sync_args_explicit_wins_even_with_conflicts_declared(tmp_path, capsy
 
     backend.sync()
 
-    assert runner.calls[0]["args"] == ["uv", "sync", "--locked", "--extra", "cpu", "--python", "3.12"]
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--extra",
+        "cpu",
+        "--python",
+        "3.12",
+    ]
     assert "::warning::" not in capsys.readouterr().out
 
 

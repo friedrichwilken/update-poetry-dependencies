@@ -62,7 +62,7 @@ class GithubPR:
         return self.runner.run(args, cwd=self.directory)
 
 
-def create_or_edit(gh: "GithubPR", branch: str, title: str, body: str, base: str, labels: list[str]):
+def create_or_edit(gh: GithubPR, branch: str, title: str, body: str, base: str, labels: list[str]):
     """Update the existing open PR for `branch` if there is one, else create
     a new one. Kept as a standalone function so the decision is unit
     testable without going through the full `run()` orchestration."""

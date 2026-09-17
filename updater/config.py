@@ -92,7 +92,7 @@ class Config:
     github_output: str
 
     @classmethod
-    def from_env(cls, env: dict | None = None) -> "Config":
+    def from_env(cls, env: dict | None = None) -> Config:
         env = os.environ if env is None else env
 
         def get(name: str, default: str = "") -> str:
