@@ -5,6 +5,8 @@ code decided to do."""
 
 from __future__ import annotations
 
+import sys
+
 from updater.runner import CommandResult
 
 
@@ -23,6 +25,7 @@ class FakeBackend:
         lock_exists: bool = True,
         sync_ok: bool = True,
         lock_file: str = "poetry.lock",
+        versions: dict | None = None,
     ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
@@ -31,6 +34,13 @@ class FakeBackend:
         self.updated_packages: list[str] = []
         self.sync_calls = 0
         self.install_calls = 0
+        # versions[package] is a list of versions returned by successive
+        # locked_version(package) calls (typically [old, new/attempted]);
+        # once exhausted the last value keeps being returned. Defaults to
+        # a fixed version so tests that do not care about version numbers
+        # do not need to supply any.
+        self._versions = {k: list(v) for k, v in (versions or {}).items()}
+        self.locked_version_calls: list[str] = []
 
     def lock_exists(self) -> bool:
         return self._lock_exists
@@ -55,6 +65,15 @@ class FakeBackend:
     def sync(self) -> CommandResult:
         self.sync_calls += 1
         return result(self._sync_ok)
+
+    def locked_version(self, package: str) -> str | None:
+        self.locked_version_calls.append(package)
+        seq = self._versions.get(package)
+        if not seq:
+            return "1.0.0"
+        if len(seq) > 1:
+            return seq.pop(0)
+        return seq[0]
 
 
 class FakeGit:
@@ -125,7 +144,12 @@ class FakeCommandRunner:
 
 
 class FakeRunner:
-    """Only used where run_updates needs to execute the test command."""
+    """Only used where run_updates needs to execute the test command.
+
+    Mirrors `CommandRunner.run_shell`'s contract of printing its captured
+    stdout/stderr as it "streams" them (here: all at once, since there is
+    no real subprocess) in addition to returning them on the
+    `CommandResult`, so callers cannot tell the two apart from the outside."""
 
     def __init__(self, shell_results: list | None = None):
         self._shell_results = list(shell_results or [])
@@ -133,9 +157,12 @@ class FakeRunner:
 
     def run_shell(self, command: str, cwd=None) -> CommandResult:
         self.shell_calls.append((command, cwd))
-        if self._shell_results:
-            return self._shell_results.pop(0)
-        return result(True)
+        res = self._shell_results.pop(0) if self._shell_results else result(True)
+        if res.stdout:
+            print(res.stdout, end="")
+        if res.stderr:
+            print(res.stderr, end="", file=sys.stderr)
+        return res
 
 
 class FakeGithubPR:
