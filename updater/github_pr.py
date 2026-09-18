@@ -10,8 +10,13 @@ _PR_URL_RE = re.compile(r"/pull/(\d+)")
 
 
 def parse_created_pr_number(stdout: str) -> int | None:
-    """`gh pr create` prints the new PR's URL as its only stdout line on
-    success. Used by `run()` to learn the PR number for a newly created PR
+    """`gh pr create` prints the new PR's URL on success, normally as its
+    only stdout line - but this scans the whole output for a `/pull/<n>`
+    URL rather than assuming that, so a stray leading line (a warning, a
+    notice) before the URL still parses, and it works unchanged against a
+    GitHub Enterprise Server host, whose URL has a different domain but
+    the same `/pull/<n>` path. `None` if no such URL is found anywhere in
+    `stdout`. Used by `run()` to learn the PR number for a newly created PR
     without an extra `gh` call (an edited PR's number is already known -
     it is whatever `find_open` returned)."""
     match = _PR_URL_RE.search(stdout)
