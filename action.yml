@@ -79,6 +79,12 @@ outputs:
   held-back-packages:
     description: "Comma separated list of packages where an update beyond the declared constraint was attempted (allow-major) but held back - the package may still show up in passed-packages/failed-packages/skipped-packages for the in-range update that ran instead; see report-json's beyond_constraint_* fields for details."
     value: ${{ steps.update.outputs.held-back-packages }}
+  pr-number:
+    description: "The number of the PR this run created or edited, or empty in dry-run, when nothing was pushed, or on a failure before the PR step. See docs/manual/outputs.md."
+    value: ${{ steps.update.outputs.pr-number }}
+  pr-url:
+    description: "The URL of the PR this run created or edited, or empty in dry-run, when nothing was pushed, or on a failure before the PR step. See docs/manual/outputs.md."
+    value: ${{ steps.update.outputs.pr-url }}
   pr-body:
     description: 'The rendered report / PR body.'
     value: ${{ steps.update.outputs.pr-body }}
