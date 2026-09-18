@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import json
+import re
 
 from .errors import ActionError
 from .runner import CommandRunner
+
+_PR_URL_RE = re.compile(r"/pull/(\d+)")
+
+
+def parse_created_pr_number(stdout: str) -> int | None:
+    """`gh pr create` prints the new PR's URL as its only stdout line on
+    success. Used by `run()` to learn the PR number for a newly created PR
+    without an extra `gh` call (an edited PR's number is already known -
+    it is whatever `find_open` returned)."""
+    match = _PR_URL_RE.search(stdout)
+    return int(match.group(1)) if match else None
 
 
 class GithubPR:
