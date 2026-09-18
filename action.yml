@@ -54,10 +54,10 @@ inputs:
     description: "Opt-in: after the top-level loop (and any allow-major beyond-constraint attempts) finish, run one final tested step that refreshes every dependency - transitive included - still updatable within its existing constraints (`poetry update --lock` / `uv lock --upgrade`, then a sync), committed separately as 'Update transitive dependencies'. See the README 'update-transitive: refreshing transitive dependencies' section."
     default: 'false'
   with-groups:
-    description: "A comma or newline separated list of dependency groups to additionally include (Poetry's own optional groups; a no-op for uv - see the README 'Dependency group selection' section). 'main' names the project's own ungrouped dependencies. Mutually exclusive with only-groups is not required (with-groups/without-groups may be combined); only-groups itself is mutually exclusive with both."
+    description: "A comma or newline separated list of dependency groups to additionally include when selecting what gets installed/synced (Poetry: its own optional groups; uv: additional groups on top of its own default selection - see the README 'Dependency group selection' section for why this has no effect on which top-level packages are iterated). 'main' names the project's own ungrouped dependencies. May be combined with without-groups; mutually exclusive with only-groups."
     default: ''
   without-groups:
-    description: "A comma or newline separated list of dependency groups to exclude. 'main' names the project's own ungrouped dependencies ('dev' additionally covers uv's legacy tool.uv.dev-dependencies). See the README 'Dependency group selection' section."
+    description: "A comma or newline separated list of dependency groups to exclude. 'main' names the project's own ungrouped dependencies ('dev' additionally covers uv's legacy tool.uv.dev-dependencies). May be combined with with-groups; mutually exclusive with only-groups. See the README 'Dependency group selection' section."
     default: ''
   only-groups:
     description: "A comma or newline separated list of dependency groups to exclusively include, dropping every other group ('main' included). Mutually exclusive with with-groups/without-groups. See the README 'Dependency group selection' section."

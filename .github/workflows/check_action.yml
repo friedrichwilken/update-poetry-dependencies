@@ -185,7 +185,14 @@ jobs:
             name_suffix: ', groups'
             directory: tests/fixture/poetry-batch
             python_version: '3.12'
-            test_command: 'poetry run python check.py'
+            # Deliberately the venv's own interpreter directly, not
+            # `poetry run python check.py` - see the "Assert the synced
+            # venv excludes the dev-only package" step below for why
+            # (`uv run`, and possibly `poetry run`, can implicitly
+            # re-sync using the tool's own default group selection,
+            # ignoring without-groups, so a test-command using either
+            # wrapper could transiently reinstall the excluded package).
+            test_command: '.venv/bin/python check.py'
             venv_python_command: 'poetry run python --version'
             allow_major: 'false'
             create_issues: 'false'
@@ -197,7 +204,7 @@ jobs:
             name_suffix: ', groups'
             directory: tests/fixture/uv-batch
             python_version: '3.13'
-            test_command: 'uv run python check.py'
+            test_command: '.venv/bin/python check.py'
             venv_python_command: 'uv run python --version'
             allow_major: 'false'
             create_issues: 'false'
@@ -353,6 +360,39 @@ jobs:
               status=1
               ;;
           esac
+
+          exit $status
+
+      - name: Assert the synced venv excludes the dev-only package (groups scenario)
+        # Runs before any poetry run/uv run command below (both backends'
+        # `run` subcommand can implicitly re-sync the environment using
+        # its own default group selection, ignoring without-groups - uv
+        # verified against real uv==0.12.14: `uv run` alone silently
+        # reinstalls a dev-group package that a prior `uv sync --no-group
+        # dev` had correctly left out; `uv run --no-sync`, or invoking the
+        # venv's own interpreter directly as done here, does not) - a
+        # check placed after one of those commands could pass even if
+        # without-groups had no real effect on what got synced.
+        if: matrix.scenario == 'groups'
+        working-directory: ${{ matrix.directory }}
+        run: |
+          status=0
+
+          if .venv/bin/python -c "import typing_extensions" > import_output.txt 2>&1; then
+            echo "expected typing_extensions to be excluded from the synced venv (without-groups: dev), but it imported successfully"
+            status=1
+          else
+            echo "typing_extensions import correctly failed (dev group excluded from sync):"
+            cat import_output.txt
+          fi
+          rm -f import_output.txt
+
+          if ! .venv/bin/python -c "import idna, six" > import_output.txt 2>&1; then
+            echo "expected idna/six (the main group) to still be importable"
+            cat import_output.txt
+            status=1
+          fi
+          rm -f import_output.txt
 
           exit $status
 
