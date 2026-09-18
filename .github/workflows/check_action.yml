@@ -293,6 +293,11 @@ jobs:
           FAILED: ${{ steps.update.outputs.failed-packages }}
           SKIPPED: ${{ steps.update.outputs.skipped-packages }}
           HELD_BACK: ${{ steps.update.outputs.held-back-packages }}
+          # dry-run (see the "Run action against fixture project" step
+          # above): pr-number/pr-url must be present outputs but empty -
+          # nothing was ever pushed or PR'd this run (issue #43).
+          PR_NUMBER: ${{ steps.update.outputs.pr-number }}
+          PR_URL: ${{ steps.update.outputs.pr-url }}
         run: |
           status=0
 
@@ -313,6 +318,16 @@ jobs:
 
           if [ -n "$HELD_BACK" ]; then
             echo "expected held-back-packages to be empty, got '$HELD_BACK'"
+            status=1
+          fi
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "expected pr-number to be empty in dry-run, got '$PR_NUMBER'"
+            status=1
+          fi
+
+          if [ -n "$PR_URL" ]; then
+            echo "expected pr-url to be empty in dry-run, got '$PR_URL'"
             status=1
           fi
 
