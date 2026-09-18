@@ -458,7 +458,14 @@ def write_outputs(
     body: str,
     summary_path: str = "",
     summary_body: str | None = None,
+    issue_actions_json: str = "[]",
 ) -> None:
+    """`issue_actions_json` defaults to an empty JSON array so every
+    existing call site (the early always-write guard in `run()`, the
+    `UpdateAborted` path, and any test that does not care about
+    `create-issues`) keeps writing a well-formed `issue-actions` output
+    without having to know about the feature at all - only the one
+    successful, non-aborted path in `run()` ever passes a real value."""
     if output_path:
         with open(output_path, "a", encoding="utf-8") as fh:
             fh.write(f"passed-packages={','.join(result.passed)}\n")
@@ -466,6 +473,7 @@ def write_outputs(
             fh.write(f"skipped-packages={','.join(result.skipped)}\n")
             fh.write(f"held-back-packages={','.join(result.held_back)}\n")
             fh.write(f"report-json={report_json(result)}\n")
+            fh.write(f"issue-actions={issue_actions_json}\n")
             delimiter = f"ghadelim_{secrets.token_hex(16)}"
             fh.write(f"pr-body<<{delimiter}\n{body}\n{delimiter}\n")
 

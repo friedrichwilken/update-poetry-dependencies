@@ -86,6 +86,8 @@ class Config:
     github_base_ref: str
     dry_run: bool
     allow_major: bool
+    create_issues: bool
+    issue_labels: str
     actor: str
     server_url: str
     repository: str
@@ -114,6 +116,8 @@ class Config:
             github_base_ref=get("GITHUB_BASE_REF", ""),
             dry_run=parse_bool(get("DRY_RUN", "false")),
             allow_major=parse_bool(get("ALLOW_MAJOR", "false")),
+            create_issues=parse_bool(get("CREATE_ISSUES", "false")),
+            issue_labels=get("ISSUE_LABELS"),
             actor=get("GITHUB_ACTOR", "github-actions[bot]"),
             server_url=get("GITHUB_SERVER_URL", "https://github.com"),
             repository=get("GITHUB_REPOSITORY", ""),
