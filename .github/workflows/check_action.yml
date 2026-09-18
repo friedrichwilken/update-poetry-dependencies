@@ -26,6 +26,7 @@ jobs:
         env:
           ACTIONLINT_VERSION: '1.7.12'
         run: |
+          mkdir -p ./bin
           bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION" ./bin
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
