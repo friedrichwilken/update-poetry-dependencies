@@ -36,4 +36,4 @@ For `uv sync`, once any of the three is set, the selection switches from this ac
 
 `uv-sync-args`, when set, always wins for sync and replaces the selection outright, same as without this feature at all — `without-groups`/`only-groups` then only ever filter the listing side (`with-groups` still has no listing effect either way). See [Package managers](package-managers.md#uv).
 
-**Note:** if `test-command` itself calls `uv run`, it re-syncs using uv's own default selection, ignoring this action's narrower one for the duration of that call — see [Package managers § uv run in test-command re-syncs](package-managers.md#uv).
+**Note:** if `test-command` itself calls `uv run`, it re-syncs using uv's own default selection, ignoring this action's narrower one for the duration of that call — see [Package managers § uv run in test-command re-syncs](package-managers.md#uv-run-in-test-command-re-syncs).

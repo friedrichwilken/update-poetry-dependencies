@@ -1,23 +1,23 @@
 # Tutorial: a weekly dependency-update workflow
 
-This tutorial builds one GitHub Actions workflow step by step, starting from the smallest thing that works and adding one capability at a time. Every step shows the complete workflow file so far — copy-paste any step and it works on its own. New or changed lines are marked `# new`.
+Let's build a workflow that bumps your dependencies once a week. Then we add the advanced features, one step at a time.
 
-All the workflows below are **uv** projects. **Using Poetry?** Everything below works unchanged — the package manager is auto-detected from your lock file (`uv.lock` vs. `poetry.lock`). The only lines that differ are marked `# Poetry: '...'` — swap in that value and you have a working Poetry workflow.
-
-Each step ends with what you should see when it runs. Every input used is linked to its [manual](../manual/README.md) page — read this tutorial to learn the shape of things, and the manual when you want the full detail on one of them.
+- Every step shows the **complete file**. Copy any step and it works.
+- Lines marked `# <-` are new in that step.
+- Using **Poetry**? Swap in the values marked `Poetry: '...'`. Everything else is identical.
 
 ## 1. A minimal weekly run
 
-The action doesn't check out your repository itself, so `actions/checkout` comes first. `permissions:` is needed because the repository default for `GITHUB_TOKEN` is often read-only.
+The action doesn't check out your repository itself, so `actions/checkout` comes first.
 
 ```yaml
 name: update dependencies
 on:
   schedule:
-    - cron: '0 6 * * 1'
-  workflow_dispatch:
+    - cron: '0 6 * * 1'    # <- every Monday at 06:00 UTC (minute hour day month weekday)
+  workflow_dispatch:       # <- adds a "Run workflow" button in the Actions tab
 
-permissions:
+permissions:               # <- lets the action push a branch and open a PR
   contents: write
   pull-requests: write
 
@@ -25,21 +25,19 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4   # <- clones your repo so the action can update it
 
-      - uses: friedrichwilken/test-gated-python-updates@v2
+      - uses: friedrichwilken/test-gated-python-updates@v2   # <- the action itself
         with:
-          test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          test-command: 'uv run pytest'   # <- runs after every single update. Poetry: 'poetry run pytest'
+          github_token: ${{ secrets.GITHUB_TOKEN }}   # <- lets it push the branch and open the PR
 ```
-
-`workflow_dispatch` lets you trigger a run by hand from the Actions tab instead of waiting for Monday. `test-command` runs in `directory` via `bash -c` — see [inputs.md](../manual/inputs.md).
 
 **What you should see:** on the next scheduled run (or a manual `workflow_dispatch`), a job named `update` runs, and — if any of your top-level packages have updates that pass `test-command` — a pull request titled "Update and successfully test packages" against your default branch, opened with the built-in `GITHUB_TOKEN`.
 
 ## 2. Try it safely first
 
-Before trusting this against your real project, run it with `dry-run: 'true'`: it does everything — updates, tests, local commits — except pushing the branch or touching the PR. Read the result from the job summary instead.
+Run it once with `dry-run: 'true'`: it does everything except push the branch or touch the PR.
 
 ```yaml
 name: update dependencies
@@ -61,19 +59,19 @@ jobs:
       - uses: friedrichwilken/test-gated-python-updates@v2
         with:
           test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
-          dry-run: 'true'   # new
+          dry-run: 'true'   # <- does everything except push and open the PR
           github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Trigger it once with `workflow_dispatch`, then open the run in the Actions tab and scroll to its job summary — the same report a real run would put in the PR body is right there.
+Trigger it with `workflow_dispatch`, then open the run and scroll to its job summary — the same report a real run would put in the PR body is right there.
 
-**What you should see:** the job summary shows the "✅ Updated" / "❌ Failed" / skipped tables, but no branch is pushed and no PR appears — `git status` in the job is clean the whole time. See [`dry-run`](../manual/dry-run.md).
+**What you should see:** the job summary shows a "✅ Updated" table, a "🛑 Failed" table, and/or a one-line "⏭ No update available" list — whichever apply — but no branch is pushed and no PR appears; `git status` in the job is clean the whole time. See [`dry-run`](../manual/dry-run.md) and [the report](../manual/pr-report.md).
 
-Once you're happy with what you see, remove the `dry-run: 'true'` line (or set it to `'false'`) — the rest of this tutorial builds on the real thing.
+Once you're happy with what you see, remove the `dry-run: 'true'` line (or set it to `'false'`).
 
 ## 3. Get CI running on the PR
 
-A PR opened with the default `GITHUB_TOKEN` triggers no `pull_request` workflows at all — that's a deliberate GitHub Actions restriction. If you want your normal CI to run against the PR this action opens, pass a fine-grained PAT or GitHub App token to **both** `actions/checkout` and the action itself.
+A PR opened with the default `GITHUB_TOKEN` triggers no `pull_request` workflows at all. Pass a fine-grained PAT or GitHub App token to **both** `actions/checkout` and the action itself to get normal CI on it.
 
 ```yaml
 name: update dependencies
@@ -91,16 +89,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.DEPS_UPDATE_TOKEN }}   # new
+        with:                                            # <- checkout needs the PAT too
+          token: ${{ secrets.DEPS_UPDATE_TOKEN }}         # <- a PAT, so the PR triggers your CI
 
       - uses: friedrichwilken/test-gated-python-updates@v2
         with:
           test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
-          github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}   # new
+          github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}   # <- same PAT, for gh pr create/edit
 ```
 
-Create a fine-grained PAT (or a GitHub App installation token) with `contents: write` and `pull-requests: write`, and store it as the `DEPS_UPDATE_TOKEN` repository secret. Either way — this token or the plain `GITHUB_TOKEN` — the repository setting **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"** must also be on, or PR creation is rejected outright. Full detail: [Token and permissions](../manual/token-and-permissions.md).
+Create a fine-grained PAT (or GitHub App token) with `contents: write` and `pull-requests: write`, and store it as the `DEPS_UPDATE_TOKEN` repository secret. Either way — this token or the plain `GITHUB_TOKEN` — the repository setting **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"** must also be on. Full detail: [Token and permissions](../manual/token-and-permissions.md).
 
 **What you should see:** the next PR this action opens (or updates) now also shows your repository's normal required checks running against it, the way any other PR would.
 
@@ -117,9 +115,9 @@ permissions:
   contents: write
   pull-requests: write
 
-concurrency:   # new
-  group: ${{ github.workflow }}   # new
-  cancel-in-progress: false   # new
+concurrency:                        # <- stops two runs racing on the same branch
+  group: ${{ github.workflow }}     # <- one slot per workflow
+  cancel-in-progress: false         # <- let an in-flight run finish first
 
 jobs:
   update:
@@ -132,19 +130,19 @@ jobs:
       - uses: friedrichwilken/test-gated-python-updates@v2
         with:
           test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
-          pr-title-prefix: '[deps] '   # new
-          pr-labels: 'dependencies'   # new
-          base-branch: 'main'   # new
+          pr-title-prefix: '[deps] '   # <- prepended to the PR title
+          pr-labels: 'dependencies'   # <- label must already exist in the repo
+          base-branch: 'main'   # <- rarely needed; defaults to the checked-out branch
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
-`pr-labels` must already exist in the repository — this action never creates one (`gh label create dependencies ...` once, or via your repo settings). `base-branch` is rarely needed (it already defaults to whichever branch is checked out) — set it explicitly if your checkout step ever lands on something other than the branch you want the PR opened against. `concurrency` stops two runs from racing to push the same fixed branch if a manual `workflow_dispatch` overlaps a scheduled run.
+`pr-labels` must already exist in the repository — this action never creates one (`gh label create dependencies ...` once, or via your repo settings).
 
 **What you should see:** the PR title is prefixed `[deps] `, carries the `dependencies` label, and targets `main` explicitly.
 
 ## 5. Faster runs: `strategy: batch-first`
 
-With many updatable packages, testing one at a time costs one test run per package. `strategy: batch-first` updates everything at once and tests once, falling back to the per-package loop only if that combined test fails.
+With many updatable packages, testing one at a time costs one test run per package. `batch-first` updates everything at once and tests once, falling back to the per-package loop only if that combined test fails.
 
 ```yaml
 name: update dependencies
@@ -175,7 +173,7 @@ jobs:
           pr-title-prefix: '[deps] '
           pr-labels: 'dependencies'
           base-branch: 'main'
-          strategy: 'batch-first'   # new
+          strategy: 'batch-first'   # <- update+test everything at once first
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
@@ -215,7 +213,7 @@ jobs:
           pr-labels: 'dependencies'
           base-branch: 'main'
           strategy: 'batch-first'
-          allow-major: 'true'   # new
+          allow-major: 'true'   # <- also try updates beyond the declared constraint
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
@@ -235,7 +233,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write   # new
+  issues: write   # <- required by create-issues
 
 concurrency:
   group: ${{ github.workflow }}
@@ -257,18 +255,16 @@ jobs:
           base-branch: 'main'
           strategy: 'batch-first'
           allow-major: 'true'
-          create-issues: 'true'   # new
-          issue-labels: 'dependencies'   # new
+          create-issues: 'true'   # <- one tracked issue per failing package
+          issue-labels: 'dependencies'   # <- must already exist too
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
-
-`issue-labels` must already exist too, same rule as `pr-labels`. `issues: write` on the token is required — it also covers the read-only issue lookup this feature needs, so no separate `issues: read` is necessary.
 
 **What you should see:** the first time a package fails, a new issue titled `<pkg>: update to <version> fails (...)`, carrying a hidden identity marker and the `dependencies` label. It gets updated silently on later still-failing runs, and closes itself automatically once the package updates cleanly. See [`create-issues`](../manual/create-issues.md).
 
 ## 8. Keep the rest fresh: `update-transitive`
 
-Every step so far only ever touches your *top-level* dependencies. `update-transitive` adds one final step that refreshes everything else too, still within already-declared constraints. Paired here with `without-groups` to show excluding a group from the top-level loop entirely.
+Every step so far only ever touches your *top-level* dependencies. `update-transitive` adds one final step that refreshes everything else too, still within already-declared constraints. This step also excludes the `dev` group from the top-level loop.
 
 ```yaml
 name: update dependencies
@@ -304,27 +300,27 @@ jobs:
           allow-major: 'true'
           create-issues: 'true'
           issue-labels: 'dependencies'
-          update-transitive: 'true'   # new
-          without-groups: 'dev'   # new
+          update-transitive: 'true'   # <- also refresh transitive dependencies
+          without-groups: 'dev'   # <- exclude the dev group from the top-level loop
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
 **uv note:** `"dev"` covers both a `dev` key in `[dependency-groups]` and uv's legacy `[tool.uv.dev-dependencies]`. **Poetry note:** the group name must be one you've actually declared (e.g. `[tool.poetry.group.dev]`) — there's no built-in `dev` group. Either way, see [Dependency groups](../manual/dependency-groups.md).
 
-**Re-sync note:** if `test-command` itself runs `uv run ...`, be aware it re-syncs the environment first using **uv's own** default group selection, not this action's narrower `without-groups` one — a test that must not see the excluded group needs `uv run --no-sync ...` or `.venv/bin/python` directly instead. See [Package managers § `uv run` in `test-command` re-syncs](../manual/package-managers.md#uv-run-in-test-command-re-syncs).
+**Re-sync note:** if `test-command` itself runs `uv run ...`, it re-syncs the environment first using **uv's own** default group selection, not this action's narrower `without-groups` one. If a test genuinely depends on the group being absent, use `uv run --no-sync ...` or `.venv/bin/python` directly instead. See [Package managers § `uv run` in `test-command` re-syncs](../manual/package-managers.md#uv-run-in-test-command-re-syncs).
 
 **What you should see:** an extra commit, `Update transitive dependencies`, when anything transitive had room to move — and, once `without-groups: dev` is set, any package that lives only in your `dev` group no longer appears in `report-json` at all.
 
 ## 9. Hands-off: auto-merge the PR when CI is green
 
-There's no `pr-number`/`pr-url` output on this action today, so the auto-merge step can't target "the PR this run just touched" directly. Instead, key a separate, `pull_request`-triggered workflow off the fixed branch name this action always uses (`deps/test-gated-updates`, or your own `branch-name` if you changed it) — the same pattern this repo uses for its own Dependabot PRs.
+There's no `pr-number`/`pr-url` output on this action today, so key a separate, `pull_request`-triggered workflow off the fixed branch name this action always uses instead — the same pattern this repo uses for its own Dependabot PRs.
 
 Add a second workflow file, `.github/workflows/automerge-deps.yml`:
 
 ```yaml
 name: auto-merge dependency updates
 on:
-  pull_request:
+  pull_request:                     # <- fires when the update PR is opened/updated
     branches: [main]
 
 permissions:
@@ -333,17 +329,21 @@ permissions:
 
 jobs:
   automerge:
-    if: github.head_ref == 'deps/test-gated-updates'
+    if: |                           # <- only this action's own PR, never a fork
+      github.head_ref == 'deps/test-gated-updates' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge
         env:
-          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}       # <- same PAT as the update workflow
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PR_URL"
+        run: gh pr merge --auto --squash "$PR_URL"         # <- merges once required checks pass
 ```
 
-This only fires on a real `pull_request` event, which needs the PAT from step 3 (`GITHUB_TOKEN` PRs never trigger it). It also needs the repository setting **Settings → General → Pull Requests → "Allow auto-merge"** on, and at least one required status check configured in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
+This only fires on a real `pull_request` event, which needs the PAT from step 3 (`GITHUB_TOKEN` PRs never trigger it). It also needs **Settings → General → Pull Requests → "Allow auto-merge"** on, and at least one required status check in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
+
+A PR from a fork never receives this workflow's secrets, so `gh pr merge` could not authenticate even if the branch-name check above matched one — the extra repository-owner condition just makes that explicit rather than relying on it implicitly.
 
 **What you should see:** once your required checks pass on the update PR, it merges itself — no click required. If "Allow auto-merge" is off, `gh pr merge --auto` fails loudly instead of merging early; turn the setting on and re-run.
 
@@ -402,7 +402,9 @@ permissions:
 
 jobs:
   automerge:
-    if: github.head_ref == 'deps/test-gated-updates'
+    if: |
+      github.head_ref == 'deps/test-gated-updates' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge
@@ -424,6 +426,6 @@ Every input above, in the manual:
 - `poetry-version`, `uv-sync-args` — optional, backend-specific; not needed above unless you pin a Poetry release or work around `tool.uv.conflicts` — see [package-managers.md](../manual/package-managers.md)
 - tokens and the `permissions:`/`issues: write` blocks — [token-and-permissions.md](../manual/token-and-permissions.md)
 - how the loop, the fixed branch and the PR itself behave — [how-it-works.md](../manual/how-it-works.md)
-- the PR body / job summary this produces — [output-rendering.md](../manual/output-rendering.md)
+- the PR body / job summary this produces — [pr-report.md](../manual/pr-report.md)
 
 This repository dogfoods a version of this same workflow on itself — see [`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) for a complete, currently-running example.

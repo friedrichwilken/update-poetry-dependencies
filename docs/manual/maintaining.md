@@ -38,6 +38,8 @@ uv run ruff format --check .
 
 The `docs` CI job renders every complete workflow example from `README.md`/`docs/**/*.md` against `./` (the local `action.yml`) and runs actionlint on the result, so a documented `with:` key that doesn't exist (or a value actionlint would reject) fails CI. `tests/unit/test_readme_sync.py` separately keeps the input/output tables in [`inputs.md`](inputs.md)/[`outputs.md`](outputs.md) honest against `action.yml`.
 
+**`uv run pytest tests/unit` does not exercise the Poetry rendition of the tutorial.** `tests/unit/test_docs_examples.py` checks the `with:` keys of every documented example exactly as written (uv), never the mechanically generated Poetry variant (applying each `# Poetry: ...` comment) - only `python3 .github/scripts/lint_docs_workflows.py` (the same script the `docs` CI job runs; needs `actionlint` on `PATH`) renders and lints both. Run it locally after touching the tutorial's Poetry-only lines.
+
 ## Why the e2e fixtures pin old versions
 
 `tests/fixture/*` deliberately lock **old** (even vulnerable) versions of a handful of small packages, so the action has something to update when the e2e job runs it in `dry-run`. Dependabot would otherwise keep opening security-update PRs against those exact fixture files and break them — [`dependabot.yml`](../../.github/dependabot.yml) sets `open-pull-requests-limit: 0` and ignores every dependency under `tests/fixture/*` for both the `pip` and `uv` ecosystems to stop that.

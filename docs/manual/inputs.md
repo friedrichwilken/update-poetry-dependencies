@@ -23,7 +23,7 @@ See [Package managers](package-managers.md).
 
 ## Pull request
 
-See [How it works](how-it-works.md) and [The report](output-rendering.md).
+See [How it works](how-it-works.md) and [The report](pr-report.md).
 
 | Name | Default | Description |
 |---|---|---|

@@ -41,6 +41,6 @@ Two more checks can still discard an otherwise-successful attempt (same effect a
 
 ## In the report
 
-The PR body gets a new "⚠️ Held back (update beyond declared constraint failed)" table (package, current, attempted, reason) once at least one package used it, and the "✅ Updated" table gains a `bump` column. With `allow-major` left at `false`, the rendered report and `report-json` are byte-identical to before this feature existed. See [The report](output-rendering.md) and [outputs.md](outputs.md#report-json).
+The PR body gets a new "⚠️ Held back (update beyond declared constraint failed)" table (package, current, attempted, reason) once at least one package used it, and the "✅ Updated" table gains a `bump` column. With `allow-major` left at `false`, the rendered report and `report-json` are byte-identical to before this feature existed. See [The report](pr-report.md) and [outputs.md](outputs.md#report-json).
 
 **Prerequisite:** like the lock file, `pyproject.toml` must have no uncommitted changes before this action runs — see [How it works](how-it-works.md#prerequisite-a-clean-manifestlock-file) — checked regardless of whether `allow-major` is enabled.

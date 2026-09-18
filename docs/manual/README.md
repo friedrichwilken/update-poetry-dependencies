@@ -13,7 +13,8 @@ Reference documentation: what's there, precisely. Looking for a guided walkthrou
 - [`update-transitive`](update-transitive.md) — refreshing transitive dependencies.
 - [Dependency groups](dependency-groups.md) — `with-groups` / `without-groups` / `only-groups`.
 - [`dry-run`](dry-run.md) — previewing a run without pushing anything.
-- [The report](output-rendering.md) — how the PR body and job summary are rendered and budgeted.
+- [The report](pr-report.md) — how the PR body and job summary are rendered and budgeted.
+- [How is this different from Dependabot / Renovate?](comparison.md) — a factual comparison.
 - [Migrating from v1](migrating-from-v1.md) — the breaking changes from the old bash action.
 - [Versioning](versioning.md) — tags, pinning, and the release process.
 - [Maintaining this repo](maintaining.md) — dev setup, tests, and how the maintainer releases new versions.

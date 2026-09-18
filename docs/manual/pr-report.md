@@ -10,11 +10,13 @@ The same rendering drives the PR body (`pr-body` output), the job summary (`GITH
 
 ## Sections
 
-- Updated — every package that got a new version this run, with a `bump` column once [`allow-major`](allow-major.md) produced at least one.
-- Failed
-- Held back (update beyond declared constraint failed) — only when `allow-major` produced at least one, see [`allow-major`](allow-major.md).
-- Transitive dependencies — only when [`update-transitive`](update-transitive.md) actually ran this run.
-- Skipped packages (compact, one line)
+In this order, each only ever rendered when it has something to show:
+
+1. `## ✅ Updated` — every package that got a new version this run, with a `bump` column once [`allow-major`](allow-major.md) produced at least one.
+2. `## 🛑 Failed`
+3. `## ⏭ No update available` — a compact, one-line list (not a table) of packages with nothing to update.
+4. `## ⚠️ Held back (update beyond declared constraint failed)` — only when `allow-major` produced at least one, see [`allow-major`](allow-major.md).
+5. `## 🔁 Transitive dependencies` — only when [`update-transitive`](update-transitive.md) actually ran this run.
 
 ## Size budgets
 

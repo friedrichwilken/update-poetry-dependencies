@@ -13,7 +13,7 @@ Every output this action sets. Generated from `action.yml`.
 | `issue-actions` | JSON array of planned/performed `create-issues` actions. Schema below. |
 | `transitive-report` | A single JSON object reporting the `update-transitive` step, or the JSON literal `null`. Schema below. |
 
-The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`. See [The report](output-rendering.md) for how `pr-body` and the job summary are rendered and budgeted.
+The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`. See [The report](pr-report.md) for how `pr-body` and the job summary are rendered and budgeted.
 
 ## `report-json`
 

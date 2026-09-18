@@ -16,13 +16,13 @@ Opt-in (default `false`): files a durable, trackable GitHub issue per failing pa
 
 An issue is filed for every top-level package whose outcome this run is `failed`, or that has a held-back [`allow-major`](allow-major.md) attempt (`beyond_constraint_failure_kind` set). A package that is both (the beyond-constraint attempt *and* the in-range fallback both failed) gets one issue about the plain failure, not two.
 
-## Identity: all three markers required
+## Identity: all three signals required
 
 - a hidden marker in the issue body, `<!-- test-gated-updates:pkg=<name> -->` (`<name>` is the PEP 503 normalized package name) — **never the title**, which is free to change between runs;
 - a second hidden marker, `<!-- test-gated-updates:state=<version>|<kind> -->`, recording what the last run reported;
-- a footer line stating the issue is managed automatically.
+- *either* a third hidden marker, `<!-- test-gated-updates:managed -->`, *or* the footer sentence stating the issue is managed automatically (its markdown link — repo name and URL — is ignored when matching, so identity never depends on the repo's current name).
 
-Requiring all three (rather than the pkg marker alone) rules out, for example, a documentation issue that merely quotes the marker syntax as an example being mistaken for a managed one. The one edge case this cannot rule out: copy-pasting a managed issue's entire body verbatim into an unrelated issue would make that issue managed too — accepted as out of scope.
+Every issue this action creates carries the marker (and the footer text); the footer-text fallback only matters for an issue a run created before the marker existed — it stays recognized without needing an edit. This identity is deliberately not tied to the repo's own name/URL: a repository rename must never orphan issues a previous run already opened. Requiring all three signals (rather than the pkg marker alone) rules out, for example, a documentation issue that merely quotes the marker syntax as an example being mistaken for a managed one. The one edge case this cannot rule out: copy-pasting a managed issue's entire body verbatim into an unrelated issue would make that issue managed too — accepted as out of scope.
 
 ## Every run, per package that needs an issue
 

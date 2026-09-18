@@ -34,4 +34,4 @@ The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv
 
 **`.venv` is rebuilt every run** (`uv venv --clear`), so restoring `.venv` itself from a CI cache does nothing useful. If you want faster syncs, cache `uv`'s own package cache instead (e.g. `actions/cache` with `path: ~/.cache/uv`, or the platform-appropriate `uv cache dir`).
 
-See [Package managers](package-managers.md) for backend-specific detail, and [The report](output-rendering.md) for how the PR body/job summary are produced.
+See [Package managers](package-managers.md) for backend-specific detail, and [The report](pr-report.md) for how the PR body/job summary are produced.
