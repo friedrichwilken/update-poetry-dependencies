@@ -332,3 +332,77 @@ def test_find_pep_declaration_normalizes_name():
 def test_find_pep_declaration_returns_none_when_absent():
     data = {"project": {"dependencies": ["idna>=3.4,<4.0"]}}
     assert find_pep_declaration(data, "nonexistent") is None
+
+
+# --- list_top_level_dependency_names group filtering (issue #4) --------------
+
+
+def _write_grouped(tmp_path):
+    return write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["six"]
+
+        [project.optional-dependencies]
+        cpu = ["numpy"]
+
+        [dependency-groups]
+        dev = ["idna"]
+        docs = ["zipp"]
+
+        [tool.uv]
+        dev-dependencies = ["legacydev"]
+        """,
+    )
+
+
+def test_group_filter_default_includes_everything(tmp_path):
+    path = _write_grouped(tmp_path)
+    assert list_top_level_dependency_names(path) == [
+        "idna",
+        "legacydev",
+        "numpy",
+        "six",
+        "zipp",
+    ]
+
+
+def test_without_groups_excludes_named_group_but_keeps_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("dev",))
+    assert "idna" not in names
+    assert "legacydev" not in names  # tool.uv.dev-dependencies is also "dev"
+    assert "numpy" in names  # an extra - never filtered by groups
+    assert "six" in names
+    assert "zipp" in names
+
+
+def test_without_groups_main_excludes_plain_dependencies(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("main",))
+    assert "six" not in names
+    assert "idna" in names
+
+
+def test_only_groups_restricts_to_named_groups_plus_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, only_groups=("docs",))
+    assert names == ["numpy", "zipp"]  # extras (numpy) are always included
+
+
+def test_only_groups_main_restricts_to_plain_dependencies_plus_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, only_groups=("main",))
+    assert names == ["numpy", "six"]
+
+
+def test_with_groups_alone_has_no_effect_on_listing(tmp_path):
+    """Every group is already iterated by default (unlike Poetry's own
+    optional groups), so with_groups has nothing left to add - see
+    list_top_level_dependency_names's own docstring."""
+    path = _write_grouped(tmp_path)
+    assert list_top_level_dependency_names(
+        path, with_groups=("docs",)
+    ) == list_top_level_dependency_names(path)

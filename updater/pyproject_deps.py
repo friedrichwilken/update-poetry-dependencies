@@ -162,6 +162,25 @@ def find_pep_declaration(data: dict, package: str) -> PepDeclaration | None:
     return None
 
 
+def _group_included(
+    group: str | None,
+    without_groups: tuple[str, ...],
+    only_groups: tuple[str, ...],
+) -> bool:
+    """Whether a requirement tagged with `group` (see
+    `list_top_level_dependency_names`) should be iterated at all -
+    `with_groups` never has any effect here (see that function's
+    docstring for why), only `without_groups`/`only_groups`. `group` is
+    `None` for an optional-dependencies (extras) entry, which is always
+    included - extras are a separate axis `with-groups`/`without-groups`/
+    `only-groups` (issue #4) does not touch."""
+    if group is None:
+        return True
+    if only_groups:
+        return group in only_groups
+    return group not in without_groups
+
+
 def has_uv_conflicts(pyproject_path: Path) -> bool:
     """True if `[tool.uv.conflicts]` declares at least one conflict set.
 
@@ -173,39 +192,62 @@ def has_uv_conflicts(pyproject_path: Path) -> bool:
     return bool(conflicts)
 
 
-def list_top_level_dependency_names(pyproject_path: Path) -> list[str]:
+def list_top_level_dependency_names(
+    pyproject_path: Path,
+    with_groups: tuple[str, ...] = (),
+    without_groups: tuple[str, ...] = (),
+    only_groups: tuple[str, ...] = (),
+) -> list[str]:
     """Return the sorted, deduplicated, PEP-503-normalized names of every
     top-level dependency declared anywhere in `pyproject_path`: base
     dependencies, every optional-dependencies extra, every dependency
     group, and the legacy `tool.uv.dev-dependencies` list. Direct URL/path
     requirements and anything pinned to a git/path/url/workspace source in
     `[tool.uv.sources]` are skipped, since `uv lock --upgrade-package`
-    cannot meaningfully bump those."""
+    cannot meaningfully bump those.
+
+    `with_groups`/`without_groups`/`only_groups` (issue #4) filter which
+    dependency GROUPS are iterated - `"main"` for `[project.dependencies]`,
+    `"dev"` for the legacy `[tool.uv.dev-dependencies]` list, and each
+    `[dependency-groups]` (PEP 735) key by its own name (see `groups.py`
+    for the full picture, including how these also drive `uv sync`'s
+    selection). `with_groups` has no effect *here*: with none of the three
+    set, every group is already iterated (today's behavior, unchanged),
+    so there is nothing left for `with_groups` to add back - it only ever
+    matters for `UvBackend.sync()`'s own selection (see
+    `groups.uv_group_sync_args`). An optional-dependencies extra is always
+    iterated regardless of any of the three - extras are a separate axis
+    this feature does not touch."""
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-    requirements: list[str] = []
+    # (requirement, group) pairs; group is None for an extra (always
+    # included - see _group_included), "main" for a plain dependency, the
+    # dependency-groups/tool.uv.dev-dependencies group name otherwise.
+    requirements: list[tuple[str, str | None]] = []
 
     project = data.get("project") or {}
-    requirements.extend(project.get("dependencies") or [])
+    requirements += [(r, "main") for r in (project.get("dependencies") or [])]
     for extra_deps in (project.get("optional-dependencies") or {}).values():
-        requirements.extend(extra_deps or [])
+        requirements += [(r, None) for r in (extra_deps or [])]
 
-    for group_entries in (data.get("dependency-groups") or {}).values():
+    for group_name, group_entries in (data.get("dependency-groups") or {}).items():
         for entry in group_entries or []:
             if isinstance(entry, str):
-                requirements.append(entry)
+                requirements.append((entry, group_name))
             # Table entries such as {"include-group": "..."} name no
             # package of their own; the group they point at is walked via
             # its own key in the same loop, so nothing is lost by skipping
             # them here.
 
     tool_uv = (data.get("tool") or {}).get("uv") or {}
-    requirements.extend(tool_uv.get("dev-dependencies") or [])
+    requirements += [(r, "dev") for r in (tool_uv.get("dev-dependencies") or [])]
 
     sources = {normalize_name(k): v for k, v in (tool_uv.get("sources") or {}).items()}
 
     names = set()
-    for requirement in requirements:
+    for requirement, group in requirements:
+        if not _group_included(group, tuple(without_groups), tuple(only_groups)):
+            continue
         name = _requirement_name(requirement)
         if name is None:
             continue
