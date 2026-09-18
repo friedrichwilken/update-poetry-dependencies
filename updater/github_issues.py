@@ -8,9 +8,19 @@ Identity requires *all three* of: a hidden pkg marker in the issue body,
 is free to change); a state marker,
 `<!-- test-gated-updates:state=<version>|<kind> -->`, which records what the
 last run reported for that package so `plan_issue_actions` can tell whether
-a comment is warranted without an extra `gh` call; and the managed-by
-footer text (`_MANAGED_BY_FOOTER`). Every issue this action itself creates
-always carries all three, so this is only ever a *stricter* check, never a
+a comment is warranted without an extra `gh` call; and *either* a hidden
+managed marker, `<!-- test-gated-updates:managed -->` (`_MANAGED_MARKER`),
+*or* the managed-by footer's own fixed English sentence with its markdown
+link (repo name and URL) ignored (`_MANAGED_FOOTER_TEXT_RE`) - deliberately
+not an exact match against the current `_MANAGED_BY_FOOTER` string, which
+embeds this repo's own name/URL: matching on that alone made identity
+silently depend on the repo never being renamed (found the hard way - see
+`test_github_issues.py`'s regression test and issue #39). The hidden
+managed marker is the primary, rename-proof signal going forward; the
+footer-text fallback (regex, link ignored) keeps recognizing issues a
+pre-marker run already created, without requiring `gh` edits to backfill
+them. Every issue this action itself creates always carries the marker
+(and the footer text), so this is only ever a *stricter* check, never a
 missed real one - see `parse_managed_issues`. Requiring all three (rather
 than the pkg marker alone) rules out a document that merely quotes the pkg
 marker syntax as an example (see the false positive noted on
@@ -89,6 +99,13 @@ _MAX_TITLE_LENGTH = 256
 _PKG_MARKER_RE = re.compile(r"<!--\s*test-gated-updates:pkg=(\S+?)\s*-->")
 _STATE_MARKER_RE = re.compile(r"<!--\s*test-gated-updates:state=(.*?)\|(.*?)\s*-->")
 
+# A third hidden marker, carrying no payload, used as the primary "this
+# issue is managed" signal (see the module docstring and
+# _MANAGED_FOOTER_TEXT_RE below for why this - not the footer text alone -
+# is what identity should rest on).
+_MANAGED_MARKER = "<!-- test-gated-updates:managed -->"
+_MANAGED_MARKER_RE = re.compile(re.escape(_MANAGED_MARKER))
+
 # A real pkg marker's payload is always normalize_name()'s output: lowercase
 # letters, digits and single hyphens only. Found by testing list_open_managed
 # against this repo's own issue #28, which - being the design issue for this
@@ -107,6 +124,20 @@ _MANAGED_BY_FOOTER = (
     "action's `create-issues` feature: it is updated on every run while the "
     "package keeps failing or being held back, and closed automatically "
     "once it no longer is. It should not be edited by hand._"
+)
+
+# A fallback identity signal for an issue created by a run *before*
+# _MANAGED_MARKER existed: the footer's own fixed English sentence, with
+# its markdown link - `[<repo name>](<repo url>)`, the one part that
+# silently changed when this repo was renamed - matched generically rather
+# than pinned to any specific name/URL. New issues always carry
+# _MANAGED_MARKER too (see _issue_footer_lines), so this regex only ever
+# matters for issues already open when this fix shipped.
+_MANAGED_FOOTER_TEXT_RE = re.compile(
+    r"This issue is managed automatically by the \[[^\]]*\]\([^)]*\) "
+    r"action's `create-issues` feature: it is updated on every run while the "
+    r"package keeps failing or being held back, and closed automatically "
+    r"once it no longer is\. It should not be edited by hand\."
 )
 
 
@@ -245,10 +276,14 @@ def parse_managed_issues(raw_issues: list[dict]) -> list[ManagedIssue]:
     marker whose payload looks like a real normalized package name (see
     `_VALID_NORMALIZED_NAME_RE`; rules out e.g. a documentation placeholder
     such as this repo's own issue #28, which quotes the marker syntax as an
-    example), a state marker, and the managed-by footer text
-    (`_MANAGED_BY_FOOTER`) - see the module docstring for why all three are
-    required. Anything short of that is silently dropped: it is not one
-    this action manages, and must never be touched (this is what keeps
+    example), a state marker, and *either* the hidden managed marker
+    (`_MANAGED_MARKER`) *or* the managed-by footer's own fixed sentence with
+    its markdown link ignored (`_MANAGED_FOOTER_TEXT_RE`) - never an exact
+    match against `_MANAGED_BY_FOOTER` itself, which embeds this repo's own
+    name/URL and would otherwise make identity depend on the repo never
+    being renamed again - see the module docstring for the full reasoning.
+    Anything short of that is silently dropped: it is not one this action
+    manages, and must never be touched (this is what keeps
     `plan_issue_actions` from ever closing or editing an unrelated issue,
     regardless of what search query found it)."""
     managed = []
@@ -265,7 +300,7 @@ def parse_managed_issues(raw_issues: list[dict]) -> list[ManagedIssue]:
         state_match = _STATE_MARKER_RE.search(body)
         if not state_match:
             continue
-        if _MANAGED_BY_FOOTER not in body:
+        if not _MANAGED_MARKER_RE.search(body) and not _MANAGED_FOOTER_TEXT_RE.search(body):
             continue
         managed.append(
             ManagedIssue(
@@ -455,6 +490,7 @@ def _issue_footer_lines(
     lines.append(f"Last seen: {last_seen}")
     lines.append("")
     lines.append(_MANAGED_BY_FOOTER)
+    lines.append(_MANAGED_MARKER)
     lines.append(f"<!-- test-gated-updates:state={version_str}|{kind_str} -->")
     return lines
 
