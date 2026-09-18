@@ -118,9 +118,62 @@ class PackageOutcome:
         )
 
 
+TransitiveStatus = Literal["updated", "failed", "unchanged"]
+
+
+@dataclass
+class ChangedTransitivePackage:
+    """One package's before/after version in a passing/failing
+    `TransitiveOutcome` - never just a name, so the report can show what
+    actually moved even when the step's own commit was discarded."""
+
+    name: str
+    old: str | None
+    new: str | None
+
+
+@dataclass
+class TransitiveOutcome:
+    """The result of the one, final `update-transitive` step (issue #24) -
+    run once per run, after the top-level loop (and any beyond-constraint
+    attempts) - never a `PackageOutcome`: it has no single old/new version
+    of its own, only a set of packages the lock-wide refresh touched, so it
+    gets its own shape and its own `transitive-report` output/PR-body
+    section instead of a synthetic entry in `report-json`'s per-package
+    array (see `report.py`).
+
+    - `"unchanged"`: the refresh (`poetry update --lock` / `uv lock
+      --upgrade`) found nothing left to update within existing constraints
+      - no test ran, nothing was committed.
+    - `"updated"`: the lock changed and the test command passed (or none
+      was given) - committed as `Update transitive dependencies`.
+      `changed_packages` lists every package the lock's own before/after
+      snapshot (`Backend.all_locked_versions()`) differed on, not just
+      those this step's own resolution step directly targeted - exactly
+      like any other lock refresh, moving one package can move others.
+    - `"failed"`: the lock changed but the test command failed (`test`) or
+      the refresh command itself failed to resolve (`resolution`) - the
+      lock file is reset back to its pre-step state and the environment
+      re-synced; `changed_packages` still lists what *would* have changed
+      (empty for a `"resolution"` failure_kind, before anything to diff
+      existed), and `output_tail` carries the tail of whichever output is
+      relevant (see `PackageOutcome.output_tail`'s own docstring for the
+      same convention).
+    """
+
+    status: TransitiveStatus
+    changed_packages: list[ChangedTransitivePackage] = field(default_factory=list)
+    failure_kind: FailureKind = None
+    output_tail: str = ""
+
+
 @dataclass
 class UpdateResult:
     outcomes: list[PackageOutcome] = field(default_factory=list)
+    # None until the update-transitive step actually runs (feature off, or
+    # not yet reached - e.g. an abort during the top-level loop) - see
+    # TransitiveOutcome and run_transitive_update().
+    transitive: TransitiveOutcome | None = None
 
     # Convenient accessors kept for byte-compatibility with the existing
     # `passed-packages`/`failed-packages`/`skipped-packages` outputs, which
@@ -874,3 +927,95 @@ def run_updates(
             backend, git, runner, packages, test_command, directory, allow_major
         )
     return _run_per_package(backend, git, runner, packages, test_command, directory, allow_major)
+
+
+def _diff_locked_versions(
+    before: dict[str, str], after: dict[str, str]
+) -> list[ChangedTransitivePackage]:
+    names = sorted(set(before) | set(after))
+    return [
+        ChangedTransitivePackage(name=name, old=before.get(name), new=after.get(name))
+        for name in names
+        if before.get(name) != after.get(name)
+    ]
+
+
+def run_transitive_update(
+    backend: Backend,
+    git: GitRepo,
+    runner: CommandRunner,
+    test_command: str,
+    directory: str,
+    result: UpdateResult,
+) -> None:
+    """The final, opt-in `update-transitive` step (`update-transitive`,
+    default `false`, issue #24) - called once, after the top-level loop
+    (`run_updates`, either strategy) and any `allow-major` beyond-constraint
+    attempts have both finished, to catch up everything else still
+    updatable within its existing constraints: a transitive dependency,
+    but also any top-level package `with-groups`/`without-groups`/
+    `only-groups` (issue #4) left out of this run's own iteration.
+
+    Always sets `result.transitive` (see `TransitiveOutcome`) before
+    returning normally. Like every other reset path in this module, a
+    re-sync failure raises `UpdateAborted` instead (carrying `result`,
+    with `result.transitive` already set to the `"failed"` outcome that
+    triggered it - mirroring `_in_range_update`/`_attempt_beyond_constraint`,
+    which always append/attach their own outcome before a reset that might
+    itself abort), so the caller never loses this step's own outcome even
+    on that failure path.
+
+    Deliberately never touches `pyproject.toml`: `Backend.update_transitive()`
+    is documented to only ever change the lock file (verified against real
+    poetry==2.4.3/uv==0.12.14 - see the backends' own `update_transitive`
+    docstrings), so this only stages/resets the lock file, same as
+    `_in_range_update`."""
+    files = backend.files_to_stage()
+    before = backend.all_locked_versions()
+
+    print("::group::transitive dependencies")
+    update_result = backend.update_transitive()
+    print(update_result.stdout)
+    print(update_result.stderr)
+
+    if not update_result.ok:
+        print("transitive dependencies update failed to resolve, discarding changes")
+        result.transitive = TransitiveOutcome(
+            status="failed",
+            failure_kind="resolution",
+            output_tail=capture_tail(update_result.stdout + "\n" + update_result.stderr),
+        )
+        _reset_and_resync(backend, git, files, "transitive dependencies", result)
+        print("::endgroup::")
+        return
+
+    if not git.diff_changed(files):
+        print("no transitive updates available")
+        result.transitive = TransitiveOutcome(status="unchanged")
+        print("::endgroup::")
+        return
+
+    after = backend.all_locked_versions()
+    changed_packages = _diff_locked_versions(before, after)
+
+    test_result, test_passed = _run_test_command(
+        runner, test_command, directory, "transitive dependencies"
+    )
+
+    if test_passed:
+        print("transitive dependencies update passed")
+        git.stage(files)
+        git.commit("Update transitive dependencies")
+        result.transitive = TransitiveOutcome(status="updated", changed_packages=changed_packages)
+        print("::endgroup::")
+        return
+
+    print("transitive dependencies update failed tests, discarding changes")
+    result.transitive = TransitiveOutcome(
+        status="failed",
+        changed_packages=changed_packages,
+        failure_kind="test",
+        output_tail=capture_tail(test_result.stdout + "\n" + test_result.stderr),
+    )
+    _reset_and_resync(backend, git, files, "transitive dependencies", result)
+    print("::endgroup::")

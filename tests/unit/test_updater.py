@@ -3,7 +3,7 @@ from fakes import FakeBackend, FakeGit, FakeRunner, result
 
 from updater.errors import ActionError, UpdateAborted
 from updater.major import MajorAttempt
-from updater.updater import run_updates
+from updater.updater import UpdateResult, run_transitive_update, run_updates
 
 
 def test_package_passes_when_lock_changes_and_test_succeeds():
@@ -945,3 +945,124 @@ def test_batch_first_allow_major_held_back_attaches_to_the_batch_outcome():
     assert outcome.beyond_constraint_version == "2.5.0"
     assert outcome.beyond_constraint_failure_kind == "resolution"
     assert outcome.strategy == "batch-first"
+
+
+# --- run_transitive_update (update-transitive, issue #24) -------------------
+
+
+def test_transitive_update_unchanged_when_lock_does_not_change():
+    backend = FakeBackend()
+    git = FakeGit(diff_results=[False])
+    runner = FakeRunner()
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "pytest", "dir", res)
+
+    assert res.transitive.status == "unchanged"
+    assert res.transitive.changed_packages == []
+    assert res.transitive.failure_kind is None
+    assert git.commit_messages == []
+    assert git.reset_calls == []
+    assert runner.shell_calls == []
+    assert backend.update_transitive_calls == 1
+
+
+def test_transitive_update_passes_and_commits_changed_packages():
+    backend = FakeBackend(
+        lock_snapshots=[
+            {"a": "1.0.0", "b": "2.0.0"},
+            {"a": "1.1.0", "b": "2.0.0", "c": "3.0.0"},
+        ]
+    )
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "pytest", "dir", res)
+
+    assert res.transitive.status == "updated"
+    assert res.transitive.failure_kind is None
+    changed = {p.name: (p.old, p.new) for p in res.transitive.changed_packages}
+    assert changed == {"a": ("1.0.0", "1.1.0"), "c": (None, "3.0.0")}
+    assert git.commit_messages == ["Update transitive dependencies"]
+    assert git.staged_calls == [[backend.lock_file]]
+    assert git.reset_calls == []
+    assert runner.shell_calls == [("pytest", "dir")]
+
+
+def test_transitive_update_skips_test_when_no_test_command_given():
+    backend = FakeBackend(lock_snapshots=[{"a": "1.0.0"}, {"a": "1.1.0"}])
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "", "dir", res)
+
+    assert res.transitive.status == "updated"
+    assert runner.shell_calls == []
+    assert git.commit_messages == ["Update transitive dependencies"]
+
+
+def test_transitive_update_test_failure_resets_and_reports():
+    backend = FakeBackend(lock_snapshots=[{"a": "1.0.0"}, {"a": "1.1.0"}])
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner(shell_results=[result(False, stdout="boom", stderr="err")])
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "pytest", "dir", res)
+
+    assert res.transitive.status == "failed"
+    assert res.transitive.failure_kind == "test"
+    assert "boom" in res.transitive.output_tail
+    assert [p.name for p in res.transitive.changed_packages] == ["a"]
+    assert git.commit_messages == []
+    assert git.reset_calls == [[backend.lock_file]]
+    assert backend.sync_calls == 1
+
+
+def test_transitive_update_resolution_failure_resets_and_reports():
+    backend = FakeBackend(update_transitive_ok=False, update_transitive_stderr="could not resolve")
+    git = FakeGit(diff_results=[])
+    runner = FakeRunner()
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "pytest", "dir", res)
+
+    assert res.transitive.status == "failed"
+    assert res.transitive.failure_kind == "resolution"
+    assert "could not resolve" in res.transitive.output_tail
+    assert res.transitive.changed_packages == []
+    assert git.commit_messages == []
+    assert git.reset_calls == [[backend.lock_file]]
+    assert runner.shell_calls == []
+
+
+def test_transitive_update_resync_failure_aborts_but_keeps_the_outcome():
+    backend = FakeBackend(sync_ok=False, lock_snapshots=[{"a": "1.0.0"}, {"a": "1.1.0"}])
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner(shell_results=[result(False, stdout="fail")])
+    res = UpdateResult()
+
+    with pytest.raises(UpdateAborted) as exc_info:
+        run_transitive_update(backend, git, runner, "pytest", "dir", res)
+
+    # The failed outcome is set before the reset+resync is even attempted,
+    # so it survives on both the original result object and the one the
+    # abort carries.
+    assert res.transitive.status == "failed"
+    assert exc_info.value.result is res
+
+
+def test_transitive_update_never_touches_the_manifest():
+    """Backend.update_transitive() is documented to only ever change the
+    lock file - files_to_stage() (lock only), not major_files_to_stage()
+    (lock + manifest), is what gets staged/reset."""
+    backend = FakeBackend(lock_snapshots=[{"a": "1.0.0"}, {"a": "1.1.0"}])
+    git = FakeGit(diff_results=[True])
+    runner = FakeRunner()
+    res = UpdateResult()
+
+    run_transitive_update(backend, git, runner, "", "dir", res)
+
+    assert backend.major_files_to_stage_calls == 0
+    assert git.staged_calls == [[backend.lock_file]]
