@@ -205,7 +205,19 @@ class PoetryBackend:
 
         before_version = self.locked_version(package)
 
-        args = ["poetry", "add", plan.requirement, "-n", *plan.extra_args]
+        # --lock: review fix, verified against real poetry==2.4.3 - a
+        # plain `poetry add` (no --lock) implicitly installs afterward
+        # using Poetry's own default group selection, which would
+        # silently reinstall a package `install()`'s own group-aware sync
+        # had correctly left out (the exact bug `update_package()` above
+        # has its own, longer comment about - found by an e2e test
+        # actually invoking the synced venv's own interpreter). The
+        # explicit `self.sync()` call below - which *does* respect
+        # `with-groups`/`without-groups`/`only-groups` - replaces it, only
+        # once the attempt is known to be worth keeping (a discarded
+        # attempt is reset+resynced by the caller instead, and --lock
+        # means nothing was ever installed for it to begin with).
+        args = ["poetry", "add", plan.requirement, "-n", "--lock", *plan.extra_args]
         result = self.runner.run(args, cwd=self.directory)
 
         if not result.ok:
@@ -225,7 +237,19 @@ class PoetryBackend:
                 discarded_reason="attempted version is a pre-release",
             )
 
-        return MajorAttempt(resolve_result=result)
+        sync_result = self.sync()
+        combined = CommandResult(
+            result.args + sync_result.args,
+            sync_result.returncode,
+            result.stdout + "\n" + sync_result.stdout,
+            result.stderr + "\n" + sync_result.stderr,
+        )
+        # A failing sync here (unlikely, but see UvBackend.try_major's own
+        # identical pattern) surfaces as an ordinary resolution failure -
+        # combined.ok being False is exactly what a real resolve failure
+        # looks like to every caller of try_major(), so no separate
+        # discarded_reason branch is needed for it.
+        return MajorAttempt(resolve_result=combined)
 
     def install(self) -> CommandResult:
         return self.runner.run(["poetry", "install", *self._group_args()], cwd=self.directory)
@@ -245,8 +269,21 @@ class PoetryBackend:
         return packages
 
     def update_package(self, package: str) -> CommandResult:
+        # `_group_args()` here (unlike try_major()'s own `poetry add`,
+        # which never needs it): `poetry update <pkg>` still resolves and
+        # updates the named package regardless of which group it belongs
+        # to (see `_group_args()`'s own docstring), but - review fix,
+        # verified against real poetry==2.4.3 - it *also* implicitly syncs
+        # the environment afterward using Poetry's own default group
+        # selection unless told otherwise, which would silently reinstall
+        # a package `install()`'s own group-aware sync had correctly left
+        # out (found by an e2e test actually invoking the synced venv's
+        # own interpreter after a per-package update, not just checking
+        # report-json). Passing the same flags here keeps that implicit
+        # sync in line with everything else.
         return self.runner.run(
-            ["poetry", "update", package, "--no-interaction"], cwd=self.directory
+            ["poetry", "update", package, "--no-interaction", *self._group_args()],
+            cwd=self.directory,
         )
 
     def update_all(self, packages: list[str]) -> CommandResult:
@@ -258,9 +295,11 @@ class PoetryBackend:
         # outright ("The following packages are not dependencies of this
         # project"), but `update_all` is only ever called with names this
         # backend's own `list_top_level_packages()` just returned, so that
-        # never happens here.
+        # never happens here. `_group_args()` guards its own implicit sync
+        # the same way `update_package()` does - see its comment above.
         return self.runner.run(
-            ["poetry", "update", *packages, "--no-interaction"], cwd=self.directory
+            ["poetry", "update", *packages, "--no-interaction", *self._group_args()],
+            cwd=self.directory,
         )
 
     def sync(self) -> CommandResult:

@@ -465,8 +465,45 @@ def test_poetry_try_major_uses_group_flag_for_group_dependency(tmp_path):
 
     assert attempt.skip_reason is None
     assert attempt.resolve_result.ok
-    assert runner.calls[0]["args"] == ["poetry", "add", "six@latest", "-n", "--group", "dev"]
+    assert runner.calls[0]["args"] == [
+        "poetry",
+        "add",
+        "six@latest",
+        "-n",
+        "--lock",
+        "--group",
+        "dev",
+    ]
     assert backend.locked_version("six") == "2.0.0"
+
+
+def test_poetry_try_major_syncs_after_a_successful_attempt_respecting_group_flags(tmp_path):
+    """Review fix: `poetry add ... --lock` only refreshes the manifest/lock
+    (verified against real poetry==2.4.3 - unlike a plain `poetry add`,
+    which implicitly installs using Poetry's own default group selection);
+    a successful, kept attempt must still sync the environment itself
+    (the caller tests against it next, with no sync of its own in
+    between) - and that sync must go through the same with-groups/
+    without-groups/only-groups selection as everything else."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[tool.poetry.group.dev.dependencies]\nsix = "^1.15.0"\n')
+    lock = tmp_path / "poetry.lock"
+    lock.write_text('[[package]]\nname = "six"\nversion = "1.15.0"\n')
+    runner = _RewritingRunner(
+        pyproject,
+        lock,
+        after_pyproject='[tool.poetry.group.dev.dependencies]\nsix = "^2.0.0"\n',
+        after_lock='[[package]]\nname = "six"\nversion = "2.0.0"\n',
+    )
+    backend = PoetryBackend(runner, str(tmp_path), "2.4.3", without_groups=["docs"])
+
+    attempt = backend.try_major("six")
+
+    assert attempt.skip_reason is None
+    assert attempt.discarded_reason is None
+    assert attempt.resolve_result.ok
+    assert len(runner.calls) == 2
+    assert runner.calls[1]["args"] == ["poetry", "sync", "--without", "docs"]
 
 
 def test_poetry_try_major_preserves_extras_in_requirement_string(tmp_path):
@@ -517,6 +554,10 @@ def test_poetry_try_major_discards_when_more_than_version_changed(tmp_path):
     assert attempt.skip_reason is None
     assert attempt.resolve_result.ok
     assert attempt.discarded_reason == "manifest changed beyond the version constraint"
+    # A discarded attempt is reset+resynced by the caller instead (and
+    # --lock means nothing was ever installed for it in the first place)
+    # - try_major itself must not have called sync() here.
+    assert len(runner.calls) == 1
 
 
 def test_poetry_try_major_resolution_failure_is_reported(tmp_path):
@@ -567,6 +608,7 @@ def test_poetry_try_major_pep621_optional_dependency_uses_optional_flag(tmp_path
         "add",
         "requests@latest",
         "-n",
+        "--lock",
         "--optional",
         "http",
     ]
@@ -765,6 +807,7 @@ def test_poetry_try_major_passes_optional_flag_for_legacy_optional_dependency(tm
         "add",
         "requests[socks]@latest",
         "-n",
+        "--lock",
         "--optional",
         "http",
     ]
@@ -913,17 +956,51 @@ def test_poetry_backend_sync_passes_group_flags():
     assert runner.calls[0]["args"] == ["poetry", "sync", "--without", "dev"]
 
 
-def test_poetry_backend_update_package_and_update_all_ignore_group_flags():
-    """A named package's own update is not restricted by group selection -
-    see PoetryBackend._group_args's own docstring."""
+def test_poetry_backend_update_package_and_update_all_no_group_flags_by_default():
+    """Byte-compat: with none of with-groups/without-groups/only-groups
+    set, the exact command is unchanged from before issue #4."""
     runner = FakeCommandRunner()
-    backend = PoetryBackend(runner, "some/dir", "2.4.3", only_groups=["dev"])
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
 
     backend.update_package("idna")
     backend.update_all(["idna", "six"])
 
     assert runner.calls[0]["args"] == ["poetry", "update", "idna", "--no-interaction"]
     assert runner.calls[1]["args"] == ["poetry", "update", "idna", "six", "--no-interaction"]
+
+
+def test_poetry_backend_update_package_and_update_all_apply_group_flags():
+    """Review fix: `poetry update <pkg>` still resolves/updates the named
+    package regardless of which group it belongs to (a package is not
+    excluded from being *updated* just because its group is not
+    selected), but it also implicitly re-syncs the environment afterward
+    - verified against real poetry==2.4.3 - so that implicit sync must
+    still respect with-groups/without-groups/only-groups, or a package
+    `install()`'s own group-aware sync correctly left out gets silently
+    reinstalled by the very next per-package update."""
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3", without_groups=["dev"])
+
+    backend.update_package("idna")
+    backend.update_all(["idna", "six"])
+
+    assert runner.calls[0]["args"] == [
+        "poetry",
+        "update",
+        "idna",
+        "--no-interaction",
+        "--without",
+        "dev",
+    ]
+    assert runner.calls[1]["args"] == [
+        "poetry",
+        "update",
+        "idna",
+        "six",
+        "--no-interaction",
+        "--without",
+        "dev",
+    ]
 
 
 def test_uv_backend_list_top_level_packages_applies_without_groups(tmp_path):
