@@ -462,4 +462,4 @@ Every input above, in the manual:
 - how the loop, the fixed branch and the PR itself behave — [how-it-works.md](../manual/how-it-works.md)
 - the PR body / job summary this produces — [pr-report.md](../manual/pr-report.md)
 
-This repository dogfoods a version of this same workflow on itself — see [`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) for a complete, currently-running example.
+This repository runs this same workflow on itself every week — see [`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) for a complete, currently-running example.

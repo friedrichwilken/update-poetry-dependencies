@@ -50,7 +50,7 @@ The `docs` CI job renders every complete workflow example from `README.md`/`docs
 
 ## This repo's own dependency updates
 
-[`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) dogfoods the action on itself (`uses: ./`, uv backend) and needs a `DEPS_UPDATE_TOKEN` secret (see [Token and permissions](token-and-permissions.md)) to get CI running on the PRs it opens; it falls back to `github.token` otherwise.
+[`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) runs the action on this repo itself every week (`uses: ./`, uv backend) - "dogfooding": using your own product and needs a `DEPS_UPDATE_TOKEN` secret (see [Token and permissions](token-and-permissions.md)) to get CI running on the PRs it opens; it falls back to `github.token` otherwise.
 
 ## Release process
 
