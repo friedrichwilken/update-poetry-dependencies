@@ -41,6 +41,12 @@ inputs:
   allow-major:
     description: "Opt-in: for each package whose declared constraint would exclude its latest release, also attempt an update beyond the declared constraint (usually, but not always, a new major version) before falling back to the plain in-range update on failure. See the README 'Beyond-constraint update attempts' section."
     default: 'false'
+  create-issues:
+    description: "Opt-in: file one GitHub issue per top-level package that fails (or has a held-back beyond-constraint attempt), updated across runs and closed automatically once it no longer applies. Requires `issues: write` on the token. See the README 'create-issues: filing issues for failures' section."
+    default: 'false'
+  issue-labels:
+    description: 'A comma or newline separated list of labels added to an issue created by create-issues. Labels must already exist in the repository.'
+    default: ''
   github_token:
     description: 'GitHub token for the PR creation.'
     required: true
@@ -64,6 +70,9 @@ outputs:
   report-json:
     description: 'JSON array of per-package update records, one object per top-level package: {name, status, old_version, new_version, failure_kind, output_tail}, plus additive fields when allow-major is used: {bump, constraint_raised, beyond_constraint_version, beyond_constraint_failure_kind, beyond_constraint_output_tail, beyond_constraint_skip_reason}. status is one of "updated", "failed", "skipped"; failure_kind is "resolution", "test", or null; bump (only on an "updated" outcome, when allow-major is used) is the actual release segment that changed: "major", "minor", "patch", or "other".'
     value: ${{ steps.update.outputs.report-json }}
+  issue-actions:
+    description: 'JSON array of planned/performed create-issues actions, one object per affected package: {package, action, issue}. action is "create", "update", or "close"; issue is the existing/created issue number, or null for a not-yet-created issue (always null in dry-run, since nothing is created). Empty array ([]) when create-issues is not enabled.'
+    value: ${{ steps.update.outputs.issue-actions }}
 
 runs:
   using: "composite"
@@ -87,6 +96,8 @@ runs:
         BASE_BRANCH: ${{ inputs.base-branch }}
         DRY_RUN: ${{ inputs.dry-run }}
         ALLOW_MAJOR: ${{ inputs.allow-major }}
+        CREATE_ISSUES: ${{ inputs.create-issues }}
+        ISSUE_LABELS: ${{ inputs.issue-labels }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
         # The updater itself always runs on a fixed, pinned interpreter

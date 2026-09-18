@@ -51,6 +51,13 @@ jobs:
 
   e2e:
     name: e2e (${{ matrix.package_manager }}${{ matrix.name_suffix }})
+    permissions:
+      contents: read
+      # Only the "basic" matrix entries below actually turn create-issues
+      # on, and dry-run never writes anything either way - but the token
+      # still needs read access for the `gh issue list` lookup that plans
+      # its actions (see updater/github_issues.py).
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +73,11 @@ jobs:
             test_command: 'poetry run python check.py'
             venv_python_command: 'poetry run python --version'
             allow_major: 'false'
+            # One matrix entry per backend also exercises create-issues -
+            # see the "Assert issue-actions output" step below. dry-run
+            # means this never actually writes to GitHub (see the
+            # "create-issues" README section).
+            create_issues: 'true'
             scenario: basic
           - package_manager: uv
             name_suffix: ''
@@ -74,6 +86,7 @@ jobs:
             test_command: 'uv run python check.py'
             venv_python_command: 'uv run python --version'
             allow_major: 'false'
+            create_issues: 'true'
             scenario: basic
           - package_manager: poetry
             name_suffix: ', major'
@@ -82,6 +95,7 @@ jobs:
             test_command: 'poetry run python check.py'
             venv_python_command: 'poetry run python --version'
             allow_major: 'true'
+            create_issues: 'false'
             scenario: major
           - package_manager: uv
             name_suffix: ', major'
@@ -90,6 +104,7 @@ jobs:
             test_command: 'uv run python check.py'
             venv_python_command: 'uv run python --version'
             allow_major: 'true'
+            create_issues: 'false'
             scenario: major
     runs-on: ubuntu-latest
     steps:
@@ -105,6 +120,7 @@ jobs:
           directory: ${{ matrix.directory }}
           test-command: ${{ matrix.test_command }}
           allow-major: ${{ matrix.allow_major }}
+          create-issues: ${{ matrix.create_issues }}
           dry-run: 'true'
           github_token: ${{ github.token }}
 
@@ -137,6 +153,32 @@ jobs:
             echo "expected held-back-packages to be empty, got '$HELD_BACK'"
             status=1
           fi
+
+          exit $status
+
+      - name: Assert issue-actions output (basic scenario, create-issues)
+        if: matrix.scenario == 'basic'
+        env:
+          ISSUE_ACTIONS: ${{ steps.update.outputs.issue-actions }}
+        run: |
+          status=0
+
+          echo "issue-actions: $ISSUE_ACTIONS"
+
+          case "$ISSUE_ACTIONS" in
+            *'{"package":"idna","action":"create","issue":null}'*) ;;
+            *)
+              echo "expected issue-actions to contain a create action for idna, got '$ISSUE_ACTIONS'"
+              status=1
+              ;;
+          esac
+
+          case "$ISSUE_ACTIONS" in
+            *'"package":"six"'*)
+              echo "expected no issue-actions entry for six (it updated cleanly), got '$ISSUE_ACTIONS'"
+              status=1
+              ;;
+          esac
 
           exit $status
 
