@@ -41,19 +41,17 @@ Before the first run:
 
 ## What you get: one PR with a report
 
-```markdown
-## ✅ Updated
-
-| package | old | new |
-| --- | --- | --- |
-| six | 1.16.0 | 1.17.0 |
-
-## 🛑 Failed
-
-| package | current | attempted | reason |
-| --- | --- | --- | --- |
-| idna | 3.6 | 3.7 | tests failed |
-```
+> **✅ Updated**
+>
+> | package | old | new |
+> | --- | --- | --- |
+> | six | 1.16.0 | 1.17.0 |
+>
+> **🛑 Failed**
+>
+> | package | current | attempted | reason |
+> | --- | --- | --- | --- |
+> | idna | 3.6 | 3.7 | tests failed |
 
 ## Going further
 - [`allow-major`](docs/manual/allow-major.md) — updates beyond the declared constraint.
