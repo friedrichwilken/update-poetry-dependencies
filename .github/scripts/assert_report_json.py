@@ -18,6 +18,17 @@ block:
   fails the test command and is held back, falling back to a passing
   in-range update (`bump: "minor"`, `constraint_raised` absent) - see
   those fixtures' `check.py` for why.
+- "batch-fallback" (`tests/fixture/poetry`/`tests/fixture/uv` again, run
+  with `strategy: 'batch-first'`): idna's update still fails the same
+  fixture test, so the one-shot batch test fails and this run falls back
+  to the per-package loop - the final outcome is identical to "basic"
+  (idna failed, six updated), but every record must additionally carry
+  `strategy: "batch-first"` and `batch_test_failed: true` (issue #23).
+- "batch-happy" (`tests/fixture/poetry-batch`/`tests/fixture/uv-batch`,
+  run with `strategy: 'batch-first'`): both idna and six update cleanly,
+  so the batch's one test run passes outright - every record is
+  `updated` with `strategy: "batch-first"` and `tested_in_batch: true`,
+  and `batch_test_failed` is absent (the batch never failed here).
 """
 
 from __future__ import annotations
@@ -108,7 +119,56 @@ def check_major(by_name: dict, check) -> None:
     )
 
 
-SCENARIOS = {"basic": check_basic, "major": check_major}
+def check_batch_fallback(by_name: dict, check) -> None:
+    # Same final outcome as "basic" - the batch's own one-shot test fails
+    # (idna) exactly like the per-package update would, so this run falls
+    # back to the per-package loop and reproduces it byte-for-byte, aside
+    # from the additive batch-first fields checked below.
+    check_basic(by_name, check)
+
+    for name in ("idna", "six"):
+        record = by_name.get(name, {})
+        check(
+            record.get("strategy") == "batch-first",
+            f"{name} strategy: {record.get('strategy')!r}",
+        )
+        check(
+            record.get("batch_test_failed") is True,
+            f"{name} batch_test_failed: {record.get('batch_test_failed')!r}",
+        )
+
+
+def check_batch_happy(by_name: dict, check) -> None:
+    check("idna" in by_name, "expected an idna record")
+    check("six" in by_name, "expected a six record")
+
+    for name in ("idna", "six"):
+        record = by_name.get(name, {})
+        check(record.get("status") == "updated", f"{name} status: {record.get('status')!r}")
+        check(
+            record.get("old_version") != record.get("new_version"),
+            f"{name} old_version == new_version: {record.get('old_version')!r}",
+        )
+        check(
+            record.get("strategy") == "batch-first",
+            f"{name} strategy: {record.get('strategy')!r}",
+        )
+        check(
+            record.get("tested_in_batch") is True,
+            f"{name} tested_in_batch: {record.get('tested_in_batch')!r}",
+        )
+        check(
+            "batch_test_failed" not in record,
+            f"{name} should have no batch_test_failed field (the batch test passed)",
+        )
+
+
+SCENARIOS = {
+    "basic": check_basic,
+    "major": check_major,
+    "batch-fallback": check_batch_fallback,
+    "batch-happy": check_batch_happy,
+}
 
 
 def main() -> int:
