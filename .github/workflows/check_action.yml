@@ -16,6 +16,22 @@ jobs:
       - name: Lint workflows and action.yml
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION" ./bin
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Render documented workflow examples (uv and Poetry) and lint them
+        run: python3 .github/scripts/lint_docs_workflows.py
+
   unit-tests:
     runs-on: ubuntu-latest
     steps:
