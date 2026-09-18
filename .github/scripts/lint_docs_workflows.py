@@ -32,8 +32,18 @@ USES_TARGET_RE = re.compile(
     r"uses:(\s*)(friedrichwilken/"
     r"(?:update-poetry-dependencies|test-gated-python-updates)(?:@\S*)?)"
 )
+# The value on both sides of "Poetry:" is always a single-quoted YAML
+# string in this tutorial (e.g. 'uv run pytest') - matched quote-aware
+# (`'[^']*'`, stopping at the closing quote) rather than "everything up to
+# the next #", so a value that itself contains a `#` or `:` inside its
+# quotes can never be mistaken for the start of the trailing comment. Works
+# whether the comment is the plain `# Poetry: '...'` form or the combined
+# `# <- <description>. Poetry: '...'` form used the one time a line is
+# both new and Poetry-divergent - `.*?` only needs to reach the first
+# "Poetry:" after the `#`, regardless of what comes before it.
 POETRY_LINE_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_-]+:\s*)(?P<oldval>.*?)\s*#.*Poetry:\s*(?P<newval>.+?)\s*$"
+    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_-]+:\s*)(?P<oldval>'[^']*')"
+    r"\s*#.*?Poetry:\s*(?P<newval>'[^']*')\s*$"
 )
 
 
