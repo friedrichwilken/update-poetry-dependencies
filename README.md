@@ -56,6 +56,7 @@ Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv
 | base-branch       | Base branch for the PR. If the checkout is detached (e.g. `pull_request` events), falls back to `GITHUB_BASE_REF`; if neither is available the action fails fast, before doing any work. | the currently checked out branch | no |
 | dry-run           | Run the full update loop but skip pushing the branch and creating/updating the PR.               | `false`                         | no       |
 | allow-major       | Opt-in: also attempt an update beyond the declared constraint (raising it) for a package whose constraint would otherwise exclude its latest release, falling back to the plain in-range update if that attempt fails. Despite the name, this is not always a semver-major bump. See "Beyond-constraint update attempts" below. | `false` | no |
+| strategy          | `per-package` (default): update, test and commit one top-level package at a time. `batch-first`: update every package at once and test once; falls back to the per-package loop on failure. Cuts test runs from N down to close to 1 in the happy path. See "`strategy`: `batch-first`" below. | `per-package` | no |
 | create-issues     | Opt-in: file one GitHub issue per top-level package that fails (or has a held-back beyond-constraint attempt), kept up to date and closed automatically across runs. Requires `issues: write` on the token. See "`create-issues`: filing issues for failures" below. | `false` | no |
 | issue-labels      | A comma or newline separated list of labels added to an issue created by `create-issues`. Labels must already exist in the repository - this action never creates one. | `""` | no |
 | github_token      | GitHub token for PR creation.                                                                   |                                  | **yes**  |
@@ -100,6 +101,9 @@ If the update loop has to abort early (currently only when re-syncing the enviro
 | beyond_constraint_output_tail | string | Only present alongside `beyond_constraint_version`: tail of the held-back attempt's captured output. |
 | beyond_constraint_output_truncated | boolean | Only present (`true`) when `output_tail`/`beyond_constraint_output_tail` were dropped together to keep `report-json` under its size cap. |
 | beyond_constraint_skip_reason | string | Only present when `allow-major` is enabled but no attempt to go beyond the declared constraint could be made for this package at all (e.g. a git/path dependency, an exact pin, an environment marker, an unparsable constraint, or an otherwise-successful attempt that had to be discarded). |
+| strategy          | string          | Only present (`"batch-first"`) when `strategy: batch-first` was requested for this run - on every outcome it produced, whichever path actually produced it (the batch's own test, a post-divergence verification test, or a per-package fallback). See "`strategy`: `batch-first`" below. |
+| tested_in_batch   | boolean         | Only present (`true`) on an outcome whose committed update was validated by one shared test run covering every package at once, rather than its own dedicated per-package test run. |
+| batch_test_failed | boolean         | Only present (`true`) on every outcome when `strategy: batch-first`'s own one-shot batch test failed and this run fell back to the per-package loop for everything. |
 
 ### Beyond-constraint update attempts (`allow-major`)
 
@@ -129,6 +133,23 @@ After an attempt's tool call succeeds, two more checks can still discard it (sam
 The PR body gets a new "⚠️ Held back (update beyond declared constraint failed)" table (package, current, attempted, reason) with the same collapsed per-package output blocks as the "Failed" section, and the "✅ Updated" table gains a `bump` column (with a "(raised)" suffix on a row where the constraint itself was rewritten) once at least one package in the run used it. All of this is additive: with `allow-major` left at its default `false`, the rendered report and `report-json` are byte-identical to before this feature existed.
 
 **Prerequisite:** like the lock file, `pyproject.toml` must have no uncommitted changes before this action runs (see the "Prerequisite: a clean manifest/lock file" note above) - checked regardless of whether `allow-major` is enabled.
+
+### `strategy`: `batch-first`
+
+`strategy` (default `per-package`) picks how the update loop spends test runs. With N updatable top-level packages, `per-package` (today's behavior, unchanged) costs N test runs - one per package. `strategy: batch-first` (issue #23) is an opt-in alternative that costs only 1 in the happy path:
+
+1. **Batch:** update every top-level package at once (`poetry update <pkgs...>` / `uv lock --upgrade-package <pkg> ...` repeated once per package plus one `uv sync`) - in-range only; see "Interaction with `allow-major`" below. If nothing changed in the lock, every package is reported `skipped` and nothing is tested.
+2. **Test once**, against the whole batch.
+   - **Fails:** reset the lock/manifest back to the state before the batch ran, re-sync, and run the ordinary `per-package` loop for every package instead - worst case N+1 test runs total, same result the `per-package` strategy would have produced. `report-json` marks every outcome `batch_test_failed: true`, and the job summary gets a "Batch update failed tests, fell back to per-package" line.
+   - **Passes:** reset to the state before the batch again, then replay each changed package's own update and commit it on its own, in sequence, *without* testing in between - so the git history and PR report look exactly like a `per-package` run would have produced, just without paying for N-1 extra test runs. Once every package has been replayed, its result is compared against the batch's own lock file (every package's locked version, not just the top-level ones) - a resolver can be order-sensitive for transitive dependencies, so a package-by-package replay is not strictly guaranteed to reproduce the exact same lock the all-at-once batch update did:
+     - **Matches:** done. Every replayed package is reported `updated` with `tested_in_batch: true` (validated by the one batch test run, not its own).
+     - **Diverges:** one more test run, against the diverged sequential result. Passes -> keep it (still `tested_in_batch: true` - validated by this one verification run covering everything, still nowhere near N runs). Fails -> discard every replay commit and fall back to the `per-package` loop for everything instead (this path does not set `batch_test_failed` - the batch's own test genuinely passed; it is the replay that could not be trusted).
+
+A re-sync failure at any point aborts the whole run with whatever partial result exists so far, exactly like `per-package` (see "Report" above).
+
+**Interaction with `allow-major`:** the batch step itself only ever performs in-range updates, even when `allow-major` is enabled - keeping the batch itself simple and predictable. Once the batch (or its replay) has landed, `allow-major`'s beyond-constraint attempts still run exactly as they do without `batch-first`: one at a time, per package, each with its own test run. A package that both got an in-range update from the batch *and* has a further beyond-constraint attempt available ends up with two commits (the batch-replay's in-range commit, then the beyond-constraint commit on top) instead of one, but is still reported as a single outcome spanning the whole journey (`old_version` from before the batch ran, `new_version`/`bump`/`constraint_raised` from the beyond-constraint attempt). In short: `batch-first` only ever saves test runs on the in-range portion of the work; `allow-major`'s own test-per-attempt cost is unchanged either way.
+
+`report-json` marks every outcome of a `batch-first` run with `strategy: "batch-first"` (whichever path actually produced it, including a fallback to `per-package`), additionally to `tested_in_batch`/`batch_test_failed` above. All of this is additive: with `strategy` left at its default `per-package`, the rendered report, job summary and `report-json` are byte-identical to before this feature existed.
 
 ### `create-issues`: filing issues for failures
 
