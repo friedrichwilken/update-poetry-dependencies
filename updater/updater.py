@@ -62,6 +62,26 @@ class PackageOutcome:
       but had to be discarded (changed more than the version constraint,
       or landed on an unwanted pre-release) - reported this way rather
       than as a failure_kind, since the tool itself did not fail.
+
+    `strategy`/`tested_in_batch`/`batch_test_failed` are additive, only
+    ever set when `strategy="batch-first"` (issue #23), and otherwise stay
+    at their default (falsy) values - the default `strategy="per-package"`
+    run renders/serializes byte-identically to before this feature
+    existed:
+
+    - `strategy` is `"batch-first"` on every outcome of a batch-first run,
+      whichever path actually produced it (the batch's own one-shot test,
+      a verification re-test after a sequential-replay divergence, or a
+      per-package fallback) - it records what was *requested*, not
+      necessarily what happened.
+    - `tested_in_batch` is `True` for a package whose committed update was
+      validated by one shared test run covering every package at once
+      (the batch's own test, or - after a sequential-replay divergence -
+      the one verification re-test of the replayed result) rather than by
+      its own dedicated per-package test run.
+    - `batch_test_failed` is `True` on every outcome when the batch's own
+      one-shot test run failed and this run fell back to the ordinary
+      per-package loop for everything.
     """
 
     name: str
@@ -76,6 +96,9 @@ class PackageOutcome:
     beyond_constraint_failure_kind: FailureKind = None
     beyond_constraint_output_tail: str = ""
     beyond_constraint_skip_reason: str | None = None
+    strategy: str | None = None
+    tested_in_batch: bool = False
+    batch_test_failed: bool = False
 
     @property
     def held_back_beyond_constraint(self) -> bool:
@@ -335,7 +358,7 @@ def _attempt_beyond_constraint(
     return None, held_back, None
 
 
-def run_updates(
+def _run_per_package(
     backend: Backend,
     git: GitRepo,
     runner: CommandRunner,
@@ -407,3 +430,338 @@ def run_updates(
         print("::endgroup::")
 
     return result
+
+
+def _discard_commits_since(
+    backend: Backend, git: GitRepo, start_sha: str, context: str, result: UpdateResult
+) -> None:
+    """Hard-reset away any commits (and any leftover uncommitted change)
+    made since `start_sha`, then re-sync the environment to match. Only
+    used by the batch-first strategy to undo its own not-yet-pushed
+    sequential-replay commits when they turn out not to be trustworthy
+    (see `_run_batch_first`) - mirrors `_reset_and_resync`'s
+    abort-on-resync-failure contract, just for a whole run of commits
+    instead of one file reset."""
+    git.reset_hard(start_sha)
+    sync_result = backend.sync()
+    print(sync_result.stdout)
+    print(sync_result.stderr)
+    if not sync_result.ok:
+        raise UpdateAborted(
+            f"failed to re-sync the environment after discarding {context}; aborting",
+            result,
+        )
+
+
+def _fall_back_to_per_package(
+    backend: Backend,
+    git: GitRepo,
+    runner: CommandRunner,
+    packages: list[str],
+    test_command: str,
+    directory: str,
+    allow_major: bool,
+    batch_test_failed: bool,
+) -> UpdateResult:
+    """Runs the plain per-package loop (shared, unchanged - see
+    `_run_per_package`) and tags every outcome it produces with
+    `strategy="batch-first"` (this run still requested batch-first, even
+    though every package ended up going through the per-package path) and,
+    when the batch's own test is what triggered the fallback,
+    `batch_test_failed=True`."""
+    result = _run_per_package(backend, git, runner, packages, test_command, directory, allow_major)
+    for outcome in result.outcomes:
+        outcome.strategy = "batch-first"
+        if batch_test_failed:
+            outcome.batch_test_failed = True
+    return result
+
+
+def _finish_batch_first(
+    backend: Backend,
+    git: GitRepo,
+    runner: CommandRunner,
+    packages: list[str],
+    outcomes_by_name: dict[str, PackageOutcome],
+    old_versions: dict[str, str | None],
+    test_command: str,
+    directory: str,
+    allow_major: bool,
+) -> UpdateResult:
+    """Common tail end of a successful batch-first run (the batch's lock
+    change tested clean, and the sequential per-package replay either
+    matched it exactly or was itself re-verified - see `_run_batch_first`):
+    optionally layer the beyond-constraint attempts on top (issue #21's
+    `allow-major`, "keep it simple" per the batch-first design - the batch
+    step itself only ever does in-range updates; beyond-constraint attempts
+    always run per-package, each tested on its own, same as they would
+    without batch-first at all), then return the outcomes in `packages`
+    order.
+
+    A beyond-constraint attempt that succeeds replaces whatever outcome the
+    batch/replay produced for that package outright (its own commit lands
+    on top of the replay's, and the reported old/new/bump span the whole
+    journey from before the batch ran); one that is held back or skipped
+    just attaches its `beyond_constraint_*`/`beyond_constraint_skip_reason`
+    fields onto that outcome, exactly like the per-package loop does."""
+    if allow_major:
+        # _attempt_beyond_constraint's own abort-with-outcome helper needs
+        # an UpdateResult to attach a failed outcome to and carry along in
+        # UpdateAborted - reuse whatever has been decided so far, in
+        # `packages` order, so an abort here reports on exactly what is
+        # really committed at that point.
+        running_result = UpdateResult(
+            outcomes=[outcomes_by_name[p] for p in packages if p in outcomes_by_name]
+        )
+        for package in packages:
+            old_version = old_versions[package]
+            beyond_outcome, held_back, beyond_constraint_skip_reason = _attempt_beyond_constraint(
+                backend, git, runner, package, test_command, directory, old_version, running_result
+            )
+            if beyond_outcome is not None:
+                beyond_outcome.strategy = "batch-first"
+                outcomes_by_name[package] = beyond_outcome
+                continue
+
+            outcome = outcomes_by_name.get(package)
+            if outcome is None:
+                continue
+            if held_back is not None:
+                (
+                    outcome.beyond_constraint_version,
+                    outcome.beyond_constraint_failure_kind,
+                    outcome.beyond_constraint_output_tail,
+                ) = held_back
+            if beyond_constraint_skip_reason is not None:
+                outcome.beyond_constraint_skip_reason = beyond_constraint_skip_reason
+            if outcome.status == "updated":
+                outcome.bump = _bump_kind(outcome.old_version, outcome.new_version)
+
+    return UpdateResult(outcomes=[outcomes_by_name[p] for p in packages if p in outcomes_by_name])
+
+
+def _run_batch_first(
+    backend: Backend,
+    git: GitRepo,
+    runner: CommandRunner,
+    packages: list[str],
+    test_command: str,
+    directory: str,
+    allow_major: bool,
+) -> UpdateResult:
+    """Update every top-level package in one go and test once, instead of
+    once per package (issue #23) - cuts N test runs down to close to 1 in
+    the happy path:
+
+    1. `Backend.update_all(packages)` (in-range only; `allow-major`'s
+       beyond-constraint attempts are always layered on afterwards,
+       per-package - see `_finish_batch_first`). If the lock does not
+       change at all, every package is reported "skipped" and nothing is
+       tested.
+    2. Otherwise, the test command runs once against the whole batch.
+       - Fails -> reset+re-sync to the start state and fall back to the
+         ordinary per-package loop for every package (worst case: N+1 test
+         runs total) - `batch_test_failed=True` on every outcome.
+       - Passes -> reset to the start state again, then replay each
+         changed package's own `update_package()` + commit, in sequence,
+         *without* testing in between, so the git history looks the same
+         as a per-package run would have produced. Once every package has
+         been replayed, its result is compared against the batch's own
+         lock (`Backend.all_locked_versions()`) - a resolver can be
+         order-sensitive for transitive dependencies, so a replayed
+         package-by-package resolution is not guaranteed to reproduce the
+         exact same lock the all-at-once batch update did.
+         - Matches -> done; every replayed package is reported "updated"
+           with `tested_in_batch=True` (validated by the batch's one test
+           run, not its own).
+         - Diverges (or a replay step itself fails to change the lock) ->
+           one more test run, against the diverged sequential result.
+           Passes -> keep it (still `tested_in_batch=True` - validated by
+           this one verification run covering everything). Fails ->
+           hard-reset away every replay commit and fall back to the
+           ordinary per-package loop for every package instead (this path
+           never sets `batch_test_failed` - the batch's own test did pass;
+           it is the replay that could not be trusted).
+
+    A re-sync failure at any point aborts the whole run with whatever
+    partial result exists at that point, exactly like the per-package
+    loop (`UpdateAborted`, carrying the partial `UpdateResult`)."""
+    if not packages:
+        return UpdateResult()
+
+    files = backend.files_to_stage()
+    start_sha = git.head_sha()
+    old_versions = {package: backend.locked_version(package) for package in packages}
+
+    print("::group::batch update")
+    batch_result = backend.update_all(packages)
+    print(batch_result.stdout)
+    print(batch_result.stderr)
+
+    if not batch_result.ok:
+        print("batch update failed to resolve; falling back to the per-package loop")
+        print("::endgroup::")
+        abort_result = UpdateResult()
+        _reset_and_resync(backend, git, files, "batch update", abort_result)
+        return _fall_back_to_per_package(
+            backend, git, runner, packages, test_command, directory, allow_major, False
+        )
+
+    if not git.diff_changed(files):
+        print("nothing to update in the batch")
+        print("::endgroup::")
+        return UpdateResult(
+            outcomes=[
+                PackageOutcome(
+                    name=package,
+                    status="skipped",
+                    old_version=old_versions[package],
+                    new_version=old_versions[package],
+                    strategy="batch-first",
+                )
+                for package in packages
+            ]
+        )
+
+    new_versions = {package: backend.locked_version(package) for package in packages}
+    changed_packages = [p for p in packages if new_versions[p] != old_versions[p]]
+    batch_snapshot = backend.all_locked_versions()
+
+    _, test_passed = _run_test_command(runner, test_command, directory, "batch update")
+    print("::endgroup::")
+
+    if not test_passed:
+        print("batch update failed the test command; falling back to the per-package loop")
+        abort_result = UpdateResult()
+        _reset_and_resync(backend, git, files, "batch update", abort_result)
+        return _fall_back_to_per_package(
+            backend, git, runner, packages, test_command, directory, allow_major, True
+        )
+
+    # The batch passed - reset to the start state and replay each changed
+    # package's own update, committed on its own, without testing again.
+    abort_result = UpdateResult()
+    _reset_and_resync(backend, git, files, "batch update", abort_result)
+
+    outcomes_by_name: dict[str, PackageOutcome] = {}
+    replay_step_failed = False
+    for package in changed_packages:
+        update_result = backend.update_package(package)
+        print(update_result.stdout)
+        print(update_result.stderr)
+        if not update_result.ok or not git.diff_changed(files):
+            # Should not normally happen - the batch update already proved
+            # this exact package resolves - but never trust a
+            # partially-applied replay: unlike a *complete* replay landing
+            # on a different (but internally consistent) lock than the
+            # batch did (handled below via one verification test), this
+            # leaves some packages never even attempted, so there is
+            # nothing coherent left to verify - discard immediately and
+            # fall back instead of guessing at outcomes for the rest.
+            replay_step_failed = True
+            break
+        new_version = new_versions[package]
+        git.stage(files)
+        git.commit(
+            f"Update {package} {_fmt_version(old_versions[package])} -> {_fmt_version(new_version)}"
+        )
+        outcomes_by_name[package] = PackageOutcome(
+            name=package,
+            status="updated",
+            old_version=old_versions[package],
+            new_version=new_version,
+            strategy="batch-first",
+            tested_in_batch=True,
+        )
+
+    if replay_step_failed:
+        print(
+            "batch-first sequential replay itself failed partway through; "
+            "discarding it and falling back to the per-package loop"
+        )
+        discard_result = UpdateResult()
+        _discard_commits_since(
+            backend, git, start_sha, "the batch-first sequential replay", discard_result
+        )
+        return _fall_back_to_per_package(
+            backend, git, runner, packages, test_command, directory, allow_major, False
+        )
+
+    for package in packages:
+        if package not in changed_packages:
+            outcomes_by_name[package] = PackageOutcome(
+                name=package,
+                status="skipped",
+                old_version=old_versions[package],
+                new_version=old_versions[package],
+                strategy="batch-first",
+            )
+
+    if backend.all_locked_versions() == batch_snapshot:
+        return _finish_batch_first(
+            backend,
+            git,
+            runner,
+            packages,
+            outcomes_by_name,
+            old_versions,
+            test_command,
+            directory,
+            allow_major,
+        )
+
+    print(
+        "sequential replay does not match the batch lock; running one "
+        "final verification test before trusting it"
+    )
+    _, verify_passed = _run_test_command(
+        runner, test_command, directory, "batch replay verification"
+    )
+    if verify_passed:
+        print("sequential replay verified; keeping it")
+        return _finish_batch_first(
+            backend,
+            git,
+            runner,
+            packages,
+            outcomes_by_name,
+            old_versions,
+            test_command,
+            directory,
+            allow_major,
+        )
+
+    print(
+        "sequential replay failed verification; discarding it and falling back "
+        "to the per-package loop"
+    )
+    discard_result = UpdateResult()
+    _discard_commits_since(
+        backend, git, start_sha, "the batch-first sequential replay", discard_result
+    )
+    return _fall_back_to_per_package(
+        backend, git, runner, packages, test_command, directory, allow_major, False
+    )
+
+
+def run_updates(
+    backend: Backend,
+    git: GitRepo,
+    runner: CommandRunner,
+    packages: list[str],
+    test_command: str,
+    directory: str,
+    allow_major: bool = False,
+    strategy: str = "per-package",
+) -> UpdateResult:
+    """Entry point: dispatches to `_run_batch_first` (issue #23) when
+    `strategy` is `"batch-first"`, else `_run_per_package` (today's
+    behavior, the default - see its own docstring). Every other input has
+    the exact same meaning either way; see `_run_batch_first`'s docstring
+    for how it cuts down the number of test runs and when/how it falls
+    back to the per-package loop."""
+    if strategy == "batch-first":
+        return _run_batch_first(
+            backend, git, runner, packages, test_command, directory, allow_major
+        )
+    return _run_per_package(backend, git, runner, packages, test_command, directory, allow_major)

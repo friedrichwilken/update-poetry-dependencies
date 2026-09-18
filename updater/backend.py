@@ -23,6 +23,7 @@ from .constraints import (
     poetry_classify_constraint,
 )
 from .errors import ActionError
+from .lockfile import all_locked_versions as _all_locked_versions
 from .lockfile import locked_version as _locked_version
 from .major import MajorAttempt
 from .pep440 import is_prerelease
@@ -99,6 +100,15 @@ class Backend(Protocol):
 
     def update_package(self, package: str) -> CommandResult: ...
 
+    def update_all(self, packages: list[str]) -> CommandResult:
+        """Update every one of `packages` in a single lock/resolve call
+        (used by the batch-first strategy - see `updater.run_updates`),
+        rather than one `update_package()` call per package. Only ever
+        called with names this backend's own `list_top_level_packages()`
+        just returned, so a name unknown to the project is never passed
+        in."""
+        ...
+
     def sync(self) -> CommandResult:
         """Re-sync the environment to whatever the lock file currently
         says, without changing the lock file itself."""
@@ -108,6 +118,13 @@ class Backend(Protocol):
         """The version(s) `package` is currently locked at, read straight
         from the lock file (not the installed environment), or None if the
         lock file does not mention it."""
+        ...
+
+    def all_locked_versions(self) -> dict[str, str]:
+        """Every package's locked version(s) in the current lock file,
+        keyed by normalized name - see `lockfile.all_locked_versions()`.
+        Used by the batch-first strategy to verify a sequential replay
+        reproduces the same lock a one-shot batch update produced."""
         ...
 
 
@@ -192,6 +209,20 @@ class PoetryBackend:
             ["poetry", "update", package, "--no-interaction"], cwd=self.directory
         )
 
+    def update_all(self, packages: list[str]) -> CommandResult:
+        # Verified against real poetry==2.4.3: `poetry update a b --no-interaction`
+        # resolves and updates every listed package in one call, exactly
+        # like a plain `poetry update` restricted to those names - it
+        # never touches a package left out of the list. A name that is
+        # not a dependency of the project makes the whole call fail
+        # outright ("The following packages are not dependencies of this
+        # project"), but `update_all` is only ever called with names this
+        # backend's own `list_top_level_packages()` just returned, so that
+        # never happens here.
+        return self.runner.run(
+            ["poetry", "update", *packages, "--no-interaction"], cwd=self.directory
+        )
+
     def sync(self) -> CommandResult:
         """Poetry >= 2 uses the dedicated `sync` command; 1.x needs
         `install --sync`."""
@@ -201,6 +232,9 @@ class PoetryBackend:
 
     def locked_version(self, package: str) -> str | None:
         return _locked_version(self.lock_file_path(), package)
+
+    def all_locked_versions(self) -> dict[str, str]:
+        return _all_locked_versions(self.lock_file_path())
 
 
 class _PoetryMajorPlan:
@@ -539,11 +573,35 @@ class UvBackend:
             return lock_result
         return self.sync()
 
+    def update_all(self, packages: list[str]) -> CommandResult:
+        # Verified against real uv==0.12.14: repeating `--upgrade-package`
+        # once per name and re-locking once is the safest one-call
+        # equivalent of updating a list of top-level packages - it only
+        # touches the packages named (any other top-level/transitive
+        # package moves only if the resolver needs it to satisfy those
+        # upgrades), and a name that is not a dependency of the project is
+        # silently accepted as a no-op rather than failing the whole lock
+        # (unlike Poetry's `update` - see `PoetryBackend.update_all`).
+        # `update_all` is only ever called with names this backend's own
+        # `list_top_level_packages()` just returned, so that tolerance is
+        # never actually relied on here.
+        args = ["uv", "lock"]
+        for package in packages:
+            args += ["--upgrade-package", package]
+        args += ["--python", self.python_version]
+        lock_result = self.runner.run(args, cwd=self.directory)
+        if not lock_result.ok:
+            return lock_result
+        return self.sync()
+
     def sync(self) -> CommandResult:
         return self.runner.run(self._sync_args(), cwd=self.directory)
 
     def locked_version(self, package: str) -> str | None:
         return _locked_version(self.lock_file_path(), package)
+
+    def all_locked_versions(self) -> dict[str, str]:
+        return _all_locked_versions(self.lock_file_path())
 
 
 def make_backend(package_manager: str, runner: CommandRunner, cfg: Config) -> Backend:
