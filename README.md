@@ -70,7 +70,7 @@ Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv
 | held-back-packages | Comma separated list of packages where an update beyond the declared constraint was attempted (`allow-major`) but held back; see "Beyond-constraint update attempts" below. |
 | pr-body           | The rendered report / PR body.                                              |
 | report-json       | JSON array of per-package records; see "Report" below for the field reference. |
-| issue-actions     | JSON array of planned/performed `create-issues` actions, one object per affected package: `{package, action, issue}`. `action` is `create`, `update`, or `close`; `issue` is the existing/created issue number, or `null` for a not-yet-created issue (always `null` in `dry-run`, since nothing is actually created). `[]` when `create-issues` is not enabled. See "`create-issues`: filing issues for failures" below. |
+| issue-actions     | JSON array of planned/performed `create-issues` actions, one object per affected package: `{package, action, issue}`, plus an additive `error` field when that specific action's own `gh` call failed. `action` is `create`, `update`, or `close`; `issue` is the existing/created issue number, or `null` for a not-yet-created issue (always `null` in `dry-run`, since nothing is actually created, and also `null` for a failed create). `[]` when `create-issues` is not enabled. See "`create-issues`: filing issues for failures" below. |
 
 The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`.
 
@@ -134,22 +134,25 @@ The PR body gets a new "⚠️ Held back (update beyond declared constraint fail
 
 `create-issues` (default `false`) is an opt-in extension that hands failures off to a durable, trackable GitHub issue instead of (or in addition to) the PR report, which only ever reflects the latest run. It runs after the PR is created/edited (so the issue can link to it) and requires `issues: write` on the token (see "Token and permissions" below).
 
-**One issue per package, never per run.** An issue is filed for every top-level package whose outcome this run is `failed`, or that has a held-back beyond-constraint attempt (`beyond_constraint_failure_kind` set - see "Beyond-constraint update attempts" above); a package that is both (the beyond-constraint attempt *and* the in-range fallback both failed) gets one issue about the plain failure, not two. Identity is a hidden marker in the issue body, `<!-- test-gated-updates:pkg=<name> -->` (`<name>` is the PEP 503 normalized package name) - **never the title**, which is free to change between runs and is never matched on. A second hidden marker, `<!-- test-gated-updates:state=<version>|<kind> -->`, records what the last run reported, so the action can tell whether anything actually changed without an extra `gh` call.
+**One issue per package, never per run.** An issue is filed for every top-level package whose outcome this run is `failed`, or that has a held-back beyond-constraint attempt (`beyond_constraint_failure_kind` set - see "Beyond-constraint update attempts" above); a package that is both (the beyond-constraint attempt *and* the in-range fallback both failed) gets one issue about the plain failure, not two.
+
+**Identity requires all three** of a hidden marker in the issue body, `<!-- test-gated-updates:pkg=<name> -->` (`<name>` is the PEP 503 normalized package name) - **never the title**, which is free to change between runs and is never matched on; a second hidden marker, `<!-- test-gated-updates:state=<version>|<kind> -->`, which records what the last run reported, so the action can tell whether anything actually changed without an extra `gh` call; and a footer line stating the issue is managed automatically. Every issue this action creates always carries all three, so requiring all three (rather than the pkg marker alone) only ever makes the check *stricter* - it rules out, for example, a documentation/discussion issue that merely quotes the marker syntax as an example being mistaken for a managed one (a real false positive found while building this feature: this repo's own design issue for it, #28, does exactly that). The one edge case this cannot rule out: copy-pasting a managed issue's entire body verbatim into an unrelated issue would make that issue managed too - accepted as out of scope.
 
 Every run, for every package that needs an issue this way:
 
 | Situation | Action |
 |---|---|
-| No existing open managed issue for the package | **Create** one: title `<pkg>: update to <attempted> fails (<kind>)`, or for a held-back attempt, `<pkg>: update beyond declared constraint to <version> fails (<kind>)`. Body: the pkg marker, current -> attempted version, failure kind, the tail of the relevant captured output (the same safe, fenced rendering as the PR body/job summary - see `report.py`), a link to the workflow run, a link to the PR if one was created/edited this run (`null`/omitted in `dry-run`, since none is), a "last seen" note, and a footer explaining the issue is managed automatically. Labels come from `issue-labels`, exactly like `pr-labels` (only passed with `--label` when non-empty) - **the label must already exist**, this action never creates one. |
+| No existing open managed issue for the package | **Create** one: title `<pkg>: update to <attempted> fails (<kind>)`, or for a held-back attempt, `<pkg>: update beyond declared constraint to <version> fails (<kind>)` - truncated to 256 characters if needed (the package name is always kept intact; only the version/kind tail is cut, with a trailing ellipsis). Body: the pkg marker, current -> attempted version, failure kind, the tail of the relevant captured output (the same safe, fenced rendering as the PR body/job summary - see `report.py`), a link to the workflow run, a link to the PR if one was created/edited this run (`null`/omitted in `dry-run`, since none is), a "last seen" note, and a footer explaining the issue is managed automatically. Labels come from `issue-labels`, exactly like `pr-labels` (only passed with `--label` when non-empty) - **the label must already exist**, this action never creates one. |
 | An existing open managed issue for the package | **Update** its body to the current state (the pkg marker is kept as-is). A **comment is added only if** the attempted version or failure kind changed since the state marker's last recorded value - an unchanged, still-failing package is updated silently, not re-commented on every run. |
 | An existing open managed issue whose package is *not* failed/held-back in this run's outcomes | **Close** it, with a comment linking to the run (and the PR, if any) - the package either updated successfully, had nothing to update, or is no longer a top-level dependency at all. |
-| An open issue with no pkg marker at all | **Never touched.** Only issues this action itself created are ever edited or closed. |
+| More than one open managed issue for the same package | The **lowest-numbered** one is treated as canonical (used for the update/close rules above); every other one is **closed** with a "Duplicate of #\<n\>" comment. This can happen because the lookup below is not a single atomic source of truth - see "Finding existing managed issues". |
+| An open issue missing any of the three identity signals above | **Never touched.** Only issues this action itself created (or something that reproduces all three signals - see above) are ever edited or closed. |
 
-Finding existing managed issues is a single `gh issue list --state open --search '"test-gated-updates:pkg=" in:body' --json number,body --limit 200` call (falling back to a plain, unfiltered open-issue listing if `--search` itself fails) - either way, the pkg marker is always re-confirmed locally in each candidate's body before it is trusted, never taken from the search match alone.
+**Finding existing managed issues** always starts from a plain, unfiltered `gh issue list --state open --json number,body --limit 200` - GitHub's issue *search* index is only eventually consistent, so it is never the primary/only source: relying on it first could miss an issue this same run (or a concurrent one) just created and file a duplicate. Only if that plain listing comes back at exactly its `--limit` (i.e. it may itself have been truncated - there are more than 200 open issues in the repository) does a second, `gh issue list --search '"test-gated-updates:pkg=" in:body'`-narrowed call additionally run, merged in by issue number. Either way, every candidate's identity is always re-confirmed locally (all three signals above) before it is trusted, never taken from the search match alone.
 
 **Aborted runs:** if the update loop itself aborts (`UpdateAborted` - see "Report" above), issue management is skipped entirely and a `::notice::` is printed - the outcome list for an aborted run is only partial, and treating a package missing from it as "no longer failing" would incorrectly close its issue.
 
-**Dry-run:** performs no `gh` writes at all (no create/update/comment/close calls) - only the read-only listing above runs, so the plan can still be computed against real repository state. The planned actions are printed and exposed in the `issue-actions` output (`[]` when `create-issues` is off, always) as `{package, action, issue}` objects, e.g.:
+**Dry-run:** performs no `gh` writes at all (no create/update/comment/close calls) - only the read-only listing(s) above run, so the plan can still be computed against real repository state. The planned actions are printed and exposed in the `issue-actions` output (`[]` when `create-issues` is off, always) as `{package, action, issue}` objects, e.g.:
 
 ```json
 [{"package": "idna", "action": "create", "issue": null}]
@@ -157,7 +160,7 @@ Finding existing managed issues is a single `gh issue list --state open --search
 
 A compact one-line summary (e.g. `Issue actions: 1 created, 0 updated (0 commented), 0 closed (dry-run: planned only, no writes performed).`) is also appended to the job summary.
 
-**Failures never fail the run.** Once the PR has been created/edited, it is this action's primary product - a `gh issue` failure (rate limit, missing label, missing permission, ...) is caught, printed as a `::warning::`, and the run still succeeds.
+**One failing action never loses the rest.** Each package's `gh` call(s) are isolated - if e.g. one issue can no longer be commented on (deleted, transferred, locked, ...), every other package's create/update/close for this run still goes ahead. The failed action still shows up in `issue-actions`, with an additive `error` field (and `issue: null` where no issue number is known, e.g. a failed create); `run()` prints one `::warning::` per failure. **Failures never fail the run** in any case: once the PR has been created/edited, it is this action's primary product, so create-issues failures (rate limits, a missing label, a missing permission, an individual `gh` call failing, ...) never turn into a non-zero exit code.
 
 ### Token and permissions
 
@@ -215,6 +218,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # issues: write   # only needed with create-issues: 'true' below
 
 concurrency:
   group: ${{ github.workflow }}
@@ -237,6 +241,8 @@ jobs:
           pr-labels: 'dependencies'
           test-command: 'pytest'
           branch-name: 'deps/test-gated-updates'
+          # create-issues: 'true'          # opt-in - see "create-issues" above; needs issues: write above
+          # issue-labels: 'dependencies'   # only used when create-issues is enabled
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
@@ -252,6 +258,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # issues: write   # only needed with create-issues: 'true' below
 
 concurrency:
   group: ${{ github.workflow }}
@@ -274,6 +281,8 @@ jobs:
           pr-labels: 'dependencies'
           test-command: 'uv run pytest'
           branch-name: 'deps/test-gated-updates'
+          # create-issues: 'true'          # opt-in - see "create-issues" above; needs issues: write above
+          # issue-labels: 'dependencies'   # only used when create-issues is enabled
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 

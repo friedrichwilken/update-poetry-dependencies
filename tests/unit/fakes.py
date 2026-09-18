@@ -225,11 +225,27 @@ class FakeGithubPR:
 class FakeGithubIssues:
     """Duck-typed stand-in for `GithubIssues`. `open_managed` is whatever
     `list_open_managed()` should return - a list of `ManagedIssue`
-    instances the test constructs directly."""
+    instances the test constructs directly. `fail_numbers` makes
+    edit/comment/close return a failing result for that issue number (used
+    to test execute_issue_actions' per-action isolation); `fail_create`
+    does the same for every create, and `fail_create_for` for just the
+    creates whose title starts with one of the given (unnormalized)
+    package names (there is no issue number yet to key off of for a
+    "create" - see render_issue_title for the "<package>: ..." shape)."""
 
-    def __init__(self, open_managed: list | None = None, created_issue_number: int = 501):
+    def __init__(
+        self,
+        open_managed: list | None = None,
+        created_issue_number: int = 501,
+        fail_numbers: set | None = None,
+        fail_create: bool = False,
+        fail_create_for: set | None = None,
+    ):
         self._open_managed = list(open_managed or [])
         self.created_issue_number = created_issue_number
+        self._fail_numbers = set(fail_numbers or [])
+        self._fail_create = fail_create
+        self._fail_create_for = set(fail_create_for or [])
         self.list_calls = 0
         self.create_calls: list[dict] = []
         self.edit_calls: list[dict] = []
@@ -242,17 +258,26 @@ class FakeGithubIssues:
 
     def create(self, title, body, labels):
         self.create_calls.append({"title": title, "body": body, "labels": labels})
+        package = title.split(":", 1)[0]
+        if self._fail_create or package in self._fail_create_for:
+            return result(False, stderr="fake create failure")
         url = f"https://github.com/owner/repo/issues/{self.created_issue_number}"
         return result(True, stdout=url)
 
     def edit(self, number, body):
         self.edit_calls.append({"number": number, "body": body})
+        if number in self._fail_numbers:
+            return result(False, stderr="fake edit failure")
         return result(True)
 
     def comment(self, number, body):
         self.comment_calls.append({"number": number, "body": body})
+        if number in self._fail_numbers:
+            return result(False, stderr="fake comment failure")
         return result(True)
 
     def close(self, number, comment):
         self.close_calls.append({"number": number, "comment": comment})
+        if number in self._fail_numbers:
+            return result(False, stderr="fake close failure")
         return result(True)

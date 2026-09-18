@@ -438,6 +438,44 @@ def test_create_issues_failure_does_not_fail_the_run(tmp_path, capsys):
     assert _issue_actions_output(output_file) == []
 
 
+def test_create_issues_one_failing_action_does_not_lose_the_others(tmp_path, capsys):
+    """Item 2 of the follow-up review, exercised through the full run():
+    three packages fail this run (three planned "create" actions); the
+    second package's gh issue create call fails. The first and third are
+    still executed, the run still exits 0, and issue-actions reports all
+    three - the second with an error."""
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(
+        dry_run=False, create_issues=True, github_output=str(output_file), test_command=""
+    )
+    backend = FakeBackend(
+        update_ok={"a": False, "b": False, "c": False},
+        versions={"a": ["1.0.0", "1.1.0"], "b": ["1.0.0", "1.1.0"], "c": ["1.0.0", "1.1.0"]},
+    )
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[], fail_create_for={"b"})
+
+    result = run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert result == 0
+    assert len(gh_issues.create_calls) == 3  # all three were attempted
+
+    warnings = [line for line in capsys.readouterr().out.splitlines() if "::warning::" in line]
+    assert len(warnings) == 1
+    assert "b" in warnings[0]
+
+    actions = _issue_actions_output(output_file)
+    by_pkg = {a["package"]: a for a in actions}
+    assert set(by_pkg) == {"a", "b", "c"}
+    assert "error" not in by_pkg["a"]
+    assert by_pkg["a"]["issue"] is not None
+    assert "error" in by_pkg["b"]
+    assert by_pkg["b"]["issue"] is None
+    assert "error" not in by_pkg["c"]
+    assert by_pkg["c"]["issue"] is not None
+
+
 def test_aborted_run_skips_issue_management_entirely(capsys):
     cfg = make_cfg(dry_run=True, create_issues=True, test_command="pytest")
     backend = FakeBackend(update_ok={"a": False}, sync_ok=False)

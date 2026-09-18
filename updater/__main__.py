@@ -166,17 +166,24 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
         # Runs after the PR create/edit above (pr_url is known by now, or
         # deliberately still None for dry-run - see the README) and
         # before returning. A failure here must never fail a run that
-        # already produced its primary product (the PR / the report) -
-        # see run_issue_management's docstring for why it does not catch
-        # its own exceptions.
+        # already produced its primary product (the PR / the report) - a
+        # single action's own gh failure is isolated by
+        # execute_issue_actions and surfaces as one of `issue_errors`
+        # below (each printed as its own ::warning::, without losing the
+        # other actions that did succeed); run_issue_management itself can
+        # still raise outright (e.g. the initial issue listing failing),
+        # which is caught the same broad way as everywhere else this
+        # action treats a create-issues failure as non-fatal.
         if cfg.create_issues:
             try:
-                issue_actions = run_issue_management(
+                issue_actions, issue_errors = run_issue_management(
                     cfg, runner, result.outcomes, run_url, pr_url, gh_issues=gh_issues
                 )
             except Exception as exc:  # deliberately broad - see the comment above
                 print(f"::warning::create-issues: failed to manage issues: {exc}")
-                issue_actions = []
+                issue_actions, issue_errors = [], []
+            for issue_error in issue_errors:
+                print(f"::warning::create-issues: {issue_error}")
             summary_body = (
                 f"{summary_body}\n\n{summarize_issue_actions(issue_actions, cfg.dry_run)}\n"
             )

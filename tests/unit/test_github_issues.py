@@ -1,8 +1,11 @@
 import json
 
+import pytest
 from fakes import FakeGithubIssues
 
+from updater.errors import ActionError
 from updater.github_issues import (
+    _MANAGED_BY_FOOTER,
     GithubIssues,
     IssueAction,
     IssueTarget,
@@ -37,6 +40,19 @@ def _outcome(**overrides) -> PackageOutcome:
     base = dict(name="pkg", status="updated")
     base.update(overrides)
     return PackageOutcome(**base)
+
+
+def _managed_body(package: str, version: str = "", kind: str = "") -> str:
+    """A realistic managed-issue body: all three of the pkg marker, the
+    state marker, and the managed-by footer - what `render_issue_body`
+    actually produces, and what `parse_managed_issues` now requires all
+    three of (see item 3 of the follow-up review)."""
+    return (
+        f"<!-- test-gated-updates:pkg={package} -->\n"
+        "some body text\n\n"
+        f"{_MANAGED_BY_FOOTER}\n"
+        f"<!-- test-gated-updates:state={version}|{kind} -->"
+    )
 
 
 # --- issue_target_for ----------------------------------------------------
@@ -112,15 +128,7 @@ def test_issue_target_for_skipped_outcome_is_none():
 
 
 def test_parse_managed_issues_extracts_package_and_state():
-    raw = [
-        {
-            "number": 42,
-            "body": (
-                "<!-- test-gated-updates:pkg=idna -->\nsome text\n"
-                "<!-- test-gated-updates:state=4.0.0|test -->"
-            ),
-        }
-    ]
+    raw = [{"number": 42, "body": _managed_body("idna", version="4.0.0", kind="test")}]
     managed = parse_managed_issues(raw)
     assert managed == [
         ManagedIssue(number=42, package="idna", last_version="4.0.0", last_kind="test")
@@ -132,10 +140,28 @@ def test_parse_managed_issues_drops_issues_without_the_pkg_marker():
     assert parse_managed_issues(raw) == []
 
 
-def test_parse_managed_issues_handles_missing_state_marker():
-    raw = [{"number": 2, "body": "<!-- test-gated-updates:pkg=six -->"}]
-    managed = parse_managed_issues(raw)
-    assert managed == [ManagedIssue(number=2, package="six", last_version=None, last_kind=None)]
+def test_parse_managed_issues_requires_the_state_marker_too():
+    """A pkg marker alone (no state marker) is not enough - item 3 of the
+    follow-up review tightens identity to require all three markers/footer,
+    since the pkg marker alone already proved too easy to false-positive
+    on (see test_parse_managed_issues_ignores_documentation_placeholder_marker)."""
+    raw = [
+        {
+            "number": 2,
+            "body": f"<!-- test-gated-updates:pkg=six -->\n{_MANAGED_BY_FOOTER}",
+        }
+    ]
+    assert parse_managed_issues(raw) == []
+
+
+def test_parse_managed_issues_requires_the_managed_by_footer_too():
+    raw = [
+        {
+            "number": 2,
+            "body": "<!-- test-gated-updates:pkg=six -->\n<!-- test-gated-updates:state=|  -->",
+        }
+    ]
+    assert parse_managed_issues(raw) == []
 
 
 def test_parse_managed_issues_ignores_marker_mentioned_without_exact_prefix():
@@ -162,11 +188,38 @@ def test_parse_managed_issues_ignores_documentation_placeholder_marker():
     assert parse_managed_issues(raw) == []
 
 
+def test_parse_managed_issues_ignores_documentation_placeholder_even_with_state_and_footer():
+    """The stricter item-3 check (pkg + state + footer) does not weaken the
+    item-3.5 normalized-name guard - a documentation issue that happened to
+    also mention the other two markers verbatim (e.g. quoting this whole
+    module's docstring) must still be rejected on the invalid pkg payload."""
+    raw = [
+        {
+            "number": 29,
+            "body": (
+                "<!-- test-gated-updates:pkg=<name> -->\n"
+                f"{_MANAGED_BY_FOOTER}\n"
+                "<!-- test-gated-updates:state=<version>|<kind> -->"
+            ),
+        }
+    ]
+    assert parse_managed_issues(raw) == []
+
+
 def test_parse_managed_issues_accepts_a_real_normalized_name():
-    raw = [{"number": 4, "body": "<!-- test-gated-updates:pkg=charset-normalizer -->"}]
+    raw = [{"number": 4, "body": _managed_body("charset-normalizer")}]
     managed = parse_managed_issues(raw)
     assert len(managed) == 1
     assert managed[0].package == "charset-normalizer"
+
+
+def test_parse_managed_issues_copy_pasted_body_is_accepted_edge_case():
+    """Documented, accepted edge case (see README): copy-pasting a managed
+    issue's entire body verbatim into an unrelated issue makes it managed
+    too, since it then genuinely carries all three signals."""
+    raw = [{"number": 5, "body": _managed_body("idna", version="4.0.0", kind="test")}]
+    managed = parse_managed_issues(raw)
+    assert len(managed) == 1
 
 
 # --- plan_issue_actions: decision table ------------------------------------
@@ -280,6 +333,57 @@ def test_plan_mixed_create_update_close_in_one_run():
     assert by_pkg["zipp"].comment is False
 
 
+# --- plan_issue_actions: duplicate managed issues for one package ----------
+
+
+def test_plan_closes_duplicates_as_the_non_canonical_higher_numbers():
+    """Two open managed issues for the same package (possible via the
+    eventually-consistent search / a truncated listing / concurrent runs -
+    see item 1 of the follow-up review): the lowest-numbered one is
+    canonical, every other one is closed as a duplicate."""
+    outcomes = [_outcome(name="idna", status="failed", new_version="4.0.0", failure_kind="test")]
+    existing = [
+        ManagedIssue(number=12, package="idna", last_version="4.0.0", last_kind="test"),
+        ManagedIssue(number=7, package="idna", last_version="4.0.0", last_kind="test"),
+        ManagedIssue(number=20, package="idna", last_version="4.0.0", last_kind="test"),
+    ]
+    actions = plan_issue_actions(outcomes, existing)
+
+    closes = {a.issue: a for a in actions if a.action == "close"}
+    assert set(closes) == {12, 20}
+    assert closes[12].duplicate_of == 7
+    assert closes[20].duplicate_of == 7
+
+    updates = [a for a in actions if a.action == "update"]
+    assert len(updates) == 1
+    assert updates[0].issue == 7
+
+
+def test_plan_duplicate_close_actions_are_not_flagged_as_the_no_longer_failing_close():
+    """A duplicate's close action is distinguishable (via `duplicate_of`)
+    from an ordinary "package no longer failing" close - execute_issue_actions
+    uses this to pick the right comment."""
+    existing = [
+        ManagedIssue(number=7, package="idna", last_version="4.0.0", last_kind="test"),
+        ManagedIssue(number=9, package="idna", last_version="4.0.0", last_kind="test"),
+    ]
+    actions = plan_issue_actions([], existing)
+    by_issue = {a.issue: a for a in actions}
+    # the canonical (7) is closed too, since idna is no longer failing -
+    # but only the duplicate (9) carries duplicate_of
+    assert by_issue[7].action == "close"
+    assert by_issue[7].duplicate_of is None
+    assert by_issue[9].action == "close"
+    assert by_issue[9].duplicate_of == 7
+
+
+def test_plan_no_duplicate_actions_when_only_one_managed_issue_per_package():
+    outcomes = [_outcome(name="idna", status="failed", new_version="4.0.0", failure_kind="test")]
+    existing = [ManagedIssue(number=7, package="idna", last_version="4.0.0", last_kind="test")]
+    actions = plan_issue_actions(outcomes, existing)
+    assert all(a.duplicate_of is None for a in actions)
+
+
 # --- issue_actions_to_json --------------------------------------------------
 
 
@@ -300,6 +404,26 @@ def test_issue_actions_to_json_empty_list():
     assert issue_actions_to_json([]) == "[]"
 
 
+def test_issue_actions_to_json_includes_error_only_when_set():
+    actions = [
+        IssueAction(package="idna", action="create", issue=None),
+        IssueAction(package="six", action="update", issue=7, error="gh issue edit failed: boom"),
+    ]
+    data = json.loads(issue_actions_to_json(actions))
+    assert data[0] == {"package": "idna", "action": "create", "issue": None}
+    assert data[1] == {
+        "package": "six",
+        "action": "update",
+        "issue": 7,
+        "error": "gh issue edit failed: boom",
+    }
+
+
+def test_issue_actions_to_json_is_compact():
+    actions = [IssueAction(package="idna", action="create", issue=None)]
+    assert issue_actions_to_json(actions) == '[{"package":"idna","action":"create","issue":null}]'
+
+
 # --- rendering ---------------------------------------------------------
 
 
@@ -314,6 +438,25 @@ def test_render_issue_title_held_back():
         render_issue_title(target)
         == "zipp: update beyond declared constraint to 9.0 fails (resolution)"
     )
+
+
+def test_render_issue_title_truncates_long_version_kind_tail():
+    """The title's length is capped at 256 chars: the package name (and
+    its ': ' separator) is kept intact, only the version/kind tail is cut,
+    with a trailing ellipsis."""
+    long_version = "9" * 400
+    target = IssueTarget("idna", False, "3.0", long_version, "resolution", "")
+    title = render_issue_title(target)
+    assert len(title) == 256
+    assert title.startswith("idna: ")
+    assert title.endswith("…")
+
+
+def test_render_issue_title_leaves_short_titles_untouched():
+    target = IssueTarget("idna", False, "3.0", "4.0", "test", "")
+    title = render_issue_title(target)
+    assert len(title) < 256
+    assert not title.endswith("…")
 
 
 def test_render_issue_body_contains_marker_versions_and_links():
@@ -357,41 +500,107 @@ def test_render_issue_body_neutralizes_literal_details_close_tag_in_output_tail(
 # --- GithubIssues (gh CLI wrapper) ------------------------------------------
 
 
-def test_list_open_managed_uses_search_and_parses_markers():
+def test_list_open_managed_uses_the_plain_listing_as_primary():
+    """The plain, unfiltered listing is the primary (and, below the
+    truncation threshold, only) source - GitHub's issue search index is
+    only eventually consistent (item 1 of the follow-up review), so
+    --search is never the primary lookup."""
     runner = _RecordingRunner(
-        [
-            CommandResult(
-                [],
-                0,
-                json.dumps([{"number": 1, "body": "<!-- test-gated-updates:pkg=idna -->"}]),
-                "",
-            )
-        ]
+        [CommandResult([], 0, json.dumps([{"number": 1, "body": _managed_body("idna")}]), "")]
     )
     gh = GithubIssues(runner, ".")
-    managed = gh.list_open_managed()
+    managed = gh.list_open_managed(limit=200)
     assert managed == [ManagedIssue(number=1, package="idna", last_version=None, last_kind=None)]
+    assert len(runner.calls) == 1
     assert runner.calls[0][:5] == ["gh", "issue", "list", "--state", "open"]
-    assert "--search" in runner.calls[0]
+    assert "--search" not in runner.calls[0]
 
 
-def test_list_open_managed_falls_back_when_search_fails():
+def test_list_open_managed_raises_when_the_plain_listing_fails():
+    runner = _RecordingRunner([CommandResult([], 1, "", "boom")])
+    gh = GithubIssues(runner, ".")
+    with pytest.raises(ActionError):
+        gh.list_open_managed()
+
+
+def test_list_open_managed_supplements_with_search_when_the_plain_listing_is_truncated():
+    """The plain listing coming back at exactly `limit` results means it
+    may itself have been truncated (more than `limit` open issues exist) -
+    a second, --search narrowed call then runs and is merged in by issue
+    number, so a managed issue beyond the first `limit` plain results is
+    not missed."""
     runner = _RecordingRunner(
         [
-            CommandResult([], 1, "", "search not supported"),
             CommandResult(
                 [],
                 0,
-                json.dumps([{"number": 2, "body": "<!-- test-gated-updates:pkg=six -->"}]),
+                json.dumps(
+                    [
+                        {"number": 1, "body": _managed_body("idna")},
+                        {"number": 2, "body": _managed_body("six")},
+                    ]
+                ),
+                "",
+            ),
+            CommandResult(
+                [],
+                0,
+                # 2: already seen, must not be duplicated; 3: beyond the
+                # (truncated) plain listing's limit, must be picked up.
+                json.dumps(
+                    [
+                        {"number": 2, "body": _managed_body("six")},
+                        {"number": 3, "body": _managed_body("zipp")},
+                    ]
+                ),
                 "",
             ),
         ]
     )
     gh = GithubIssues(runner, ".")
-    managed = gh.list_open_managed()
-    assert managed == [ManagedIssue(number=2, package="six", last_version=None, last_kind=None)]
+    managed = gh.list_open_managed(limit=2)
+
     assert len(runner.calls) == 2
-    assert "--search" not in runner.calls[1]
+    assert "--search" in runner.calls[1]
+
+    numbers = {mi.number for mi in managed}
+    assert numbers == {1, 2, 3}
+    packages = {mi.package for mi in managed}
+    assert packages == {"idna", "six", "zipp"}
+
+
+def test_list_open_managed_tolerates_a_failing_supplementary_search():
+    """A failure of the supplementary --search call is not fatal - it only
+    ever adds coverage, so the (possibly truncated) plain listing's
+    results are still returned rather than raising."""
+    runner = _RecordingRunner(
+        [
+            CommandResult(
+                [],
+                0,
+                json.dumps(
+                    [
+                        {"number": 1, "body": _managed_body("idna")},
+                        {"number": 2, "body": _managed_body("six")},
+                    ]
+                ),
+                "",
+            ),
+            CommandResult([], 1, "", "search backend hiccup"),
+        ]
+    )
+    gh = GithubIssues(runner, ".")
+    managed = gh.list_open_managed(limit=2)
+    assert {mi.number for mi in managed} == {1, 2}
+
+
+def test_list_open_managed_does_not_supplement_when_below_the_limit():
+    runner = _RecordingRunner(
+        [CommandResult([], 0, json.dumps([{"number": 1, "body": _managed_body("idna")}]), "")]
+    )
+    gh = GithubIssues(runner, ".")
+    gh.list_open_managed(limit=200)
+    assert len(runner.calls) == 1
 
 
 def test_create_only_passes_label_flags_when_labels_given():
@@ -425,23 +634,25 @@ def test_execute_dry_run_performs_no_writes():
         ),
         IssueAction(package="six", action="close", issue=7),
     ]
-    executed = execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=True)
+    executed, errors = execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=True)
     assert gh.create_calls == []
     assert gh.close_calls == []
     assert executed == actions
     assert executed[0].issue is None
+    assert errors == []
 
 
 def test_execute_create_fills_in_the_new_issue_number():
     gh = FakeGithubIssues(created_issue_number=99)
     target = IssueTarget("idna", False, None, "4.0", "test", "")
     actions = [IssueAction(package="idna", action="create", issue=None, target=target)]
-    executed = execute_issue_actions(
+    executed, errors = execute_issue_actions(
         gh, actions, "run", "pr", ["dependencies"], "now", dry_run=False
     )
     assert len(gh.create_calls) == 1
     assert gh.create_calls[0]["labels"] == ["dependencies"]
     assert executed[0].issue == 99
+    assert errors == []
 
 
 def test_execute_update_comments_only_when_flagged():
@@ -471,6 +682,61 @@ def test_execute_close_calls_close_with_comment():
     assert "https://pr" in gh.close_calls[0]["comment"]
 
 
+def test_execute_close_uses_duplicate_comment_when_duplicate_of_is_set():
+    gh = FakeGithubIssues()
+    actions = [IssueAction(package="idna", action="close", issue=9, duplicate_of=7)]
+    execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=False)
+    assert "Duplicate of #7" in gh.close_calls[0]["comment"]
+
+
+def test_execute_isolates_a_failing_action_and_continues_with_the_rest():
+    """Item 2 of the follow-up review: one failing gh call must not abort
+    the rest of the plan, and the failure must still be reported."""
+    gh = FakeGithubIssues(fail_numbers={5})
+    actions = [
+        IssueAction(
+            package="idna",
+            action="create",
+            issue=None,
+            target=IssueTarget("idna", False, None, "4.0", "test", ""),
+        ),
+        IssueAction(
+            package="six",
+            action="update",
+            issue=5,
+            target=IssueTarget("six", False, None, "1.0", "test", ""),
+            comment=False,
+        ),
+        IssueAction(package="zipp", action="close", issue=9),
+    ]
+
+    executed, errors = execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=False)
+
+    assert len(executed) == 3
+    assert len(gh.create_calls) == 1  # idna: attempted
+    assert len(gh.edit_calls) == 1  # six: attempted (and failed)
+    assert len(gh.close_calls) == 1  # zipp: attempted (unaffected by six's failure)
+
+    by_pkg = {a.package: a for a in executed}
+    assert by_pkg["idna"].error is None
+    assert by_pkg["six"].error is not None
+    assert "six" in by_pkg["six"].error
+    assert by_pkg["zipp"].error is None
+
+    assert len(errors) == 1
+    assert "six" in errors[0]
+
+
+def test_execute_create_failure_is_recorded_with_issue_still_none():
+    gh = FakeGithubIssues(fail_create=True)
+    target = IssueTarget("idna", False, None, "4.0", "test", "")
+    actions = [IssueAction(package="idna", action="create", issue=None, target=target)]
+    executed, errors = execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=False)
+    assert executed[0].issue is None
+    assert executed[0].error is not None
+    assert len(errors) == 1
+
+
 # --- summarize_issue_actions -------------------------------------------
 
 
@@ -487,10 +753,20 @@ def test_summarize_issue_actions_counts_each_kind():
     assert "1 commented" in summary
     assert "1 closed" in summary
     assert "dry-run" not in summary
+    assert "failed" not in summary
 
 
 def test_summarize_issue_actions_notes_dry_run():
     assert "dry-run" in summarize_issue_actions([], dry_run=True)
+
+
+def test_summarize_issue_actions_counts_failed():
+    actions = [
+        IssueAction(package="a", action="create", issue=None),
+        IssueAction(package="b", action="update", issue=1, error="boom"),
+    ]
+    summary = summarize_issue_actions(actions, dry_run=False)
+    assert "1 failed" in summary
 
 
 # --- run_issue_management (orchestration) -------------------------------
@@ -506,33 +782,38 @@ class _Cfg:
 
 def test_run_issue_management_returns_empty_when_feature_off():
     gh = FakeGithubIssues()
-    result = run_issue_management(_Cfg(create_issues=False), None, [], "run", None, gh_issues=gh)
-    assert result == []
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=False), None, [], "run", None, gh_issues=gh
+    )
+    assert actions == []
+    assert errors == []
     assert gh.create_calls == []
 
 
 def test_run_issue_management_full_cycle_create():
     outcomes = [_outcome(name="idna", status="failed", new_version="4.0.0", failure_kind="test")]
     gh = FakeGithubIssues(open_managed=[], created_issue_number=55)
-    result = run_issue_management(
+    actions, errors = run_issue_management(
         _Cfg(create_issues=True), None, outcomes, "run", "pr", gh_issues=gh
     )
-    assert len(result) == 1
-    assert result[0].action == "create"
-    assert result[0].issue == 55
+    assert len(actions) == 1
+    assert actions[0].action == "create"
+    assert actions[0].issue == 55
     assert len(gh.create_calls) == 1
+    assert errors == []
 
 
 def test_run_issue_management_dry_run_creates_nothing_but_plans():
     outcomes = [_outcome(name="idna", status="failed", new_version="4.0.0", failure_kind="test")]
     gh = FakeGithubIssues(open_managed=[])
-    result = run_issue_management(
+    actions, errors = run_issue_management(
         _Cfg(create_issues=True, dry_run=True), None, outcomes, "run", None, gh_issues=gh
     )
-    assert len(result) == 1
-    assert result[0].action == "create"
-    assert result[0].issue is None
+    assert len(actions) == 1
+    assert actions[0].action == "create"
+    assert actions[0].issue is None
     assert gh.create_calls == []
+    assert errors == []
 
 
 def test_run_issue_management_uses_issue_labels():
@@ -547,3 +828,17 @@ def test_run_issue_management_uses_issue_labels():
         gh_issues=gh,
     )
     assert gh.create_calls[0]["labels"] == ["dependencies", "bug"]
+
+
+def test_run_issue_management_surfaces_a_per_action_error_without_raising():
+    """One action's failure (item 2 of the follow-up review) comes back as
+    an entry in the errors list rather than an exception - the caller
+    (`run()`) decides how to report it (a ::warning:: per entry)."""
+    outcomes = [_outcome(name="idna", status="failed", new_version="4.0.0", failure_kind="test")]
+    gh = FakeGithubIssues(open_managed=[], fail_create=True)
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=True), None, outcomes, "run", None, gh_issues=gh
+    )
+    assert len(actions) == 1
+    assert actions[0].error is not None
+    assert len(errors) == 1
