@@ -81,7 +81,7 @@ Once you're happy with what you see, remove the `dry-run: 'true'` line (or set i
 
 ## 3. Get CI running on the PR
 
-A PR opened with the default `GITHUB_TOKEN` triggers no `pull_request` workflows at all. Pass a fine-grained PAT or GitHub App token to **both** `actions/checkout` and the action itself to get normal CI on it.
+With the default `GITHUB_TOKEN`, GitHub holds the PR's CI runs until someone approves them by hand. Pass a fine-grained PAT (or GitHub App token) to **both** `actions/checkout` and the action, and they run on their own.
 
 ```yaml
 name: update dependencies
@@ -100,7 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:                                            # <- checkout needs the PAT too
-          token: ${{ secrets.DEPS_UPDATE_TOKEN }}         # <- a PAT, so the PR triggers your CI
+          token: ${{ secrets.DEPS_UPDATE_TOKEN }}         # <- a PAT, so your CI runs without approval
 
       - uses: friedrichwilken/test-gated-python-updates@v2
         with:
@@ -347,7 +347,7 @@ jobs:
 
 ## 9. Hands-off: auto-merge the PR when CI is green
 
-`pr-url` (empty in `dry-run`, or when nothing was pushed) names the PR this run created or edited — give the action step an `id` and add one more step in the same job instead of a second, `pull_request`-triggered workflow.
+`pr-url` names the PR this run created or edited. It is empty in `dry-run` and when nothing was pushed. Give the action step an `id`, then add one more step to the same job.
 
 ```yaml
 name: update dependencies
@@ -374,7 +374,7 @@ jobs:
           token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
       - uses: friedrichwilken/test-gated-python-updates@v2
-        id: update   # <- names this step so the step below can read its outputs
+        id: update   # <- lets later steps read this step's outputs
         with:
           test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
           pr-title-prefix: '[deps] '
@@ -388,17 +388,19 @@ jobs:
           without-groups: 'dev'
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
-      - name: Auto-merge when checks pass   # <- one extra step, no second workflow needed
-        if: steps.update.outputs.pr-url != ''   # <- skip in dry-run or when nothing was pushed
-        run: gh pr merge --auto --squash "$PR_URL"   # <- merges once required checks pass
-        env:                                    # <- passes the PR and the token to gh
-          PR_URL: ${{ steps.update.outputs.pr-url }}   # <- this run's own PR (see outputs.md)
-          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}   # <- same PAT as the update step
+      - name: Auto-merge when checks pass   # <- one extra step
+        if: steps.update.outputs.pr-url != ''   # <- skips dry-runs and runs with nothing to merge
+        run: gh pr merge --auto --squash "$PR_URL"   # <- GitHub merges once required checks pass
+        env:   # <- inputs for gh
+          PR_URL: ${{ steps.update.outputs.pr-url }}   # <- this run's PR
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}   # <- the PAT from step 3
 ```
 
-This needs the PAT, not `GITHUB_TOKEN`, for the same reason as step 3: the required status checks it waits for are `pull_request` workflows, which a PR opened with `GITHUB_TOKEN` never triggers — `gh pr merge --auto` would then wait forever on checks that never run.
+Needs:
 
-It also needs **Settings → General → Pull Requests → "Allow auto-merge"** on, and at least one required status check in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
+- The PAT, not `GITHUB_TOKEN` — otherwise the required checks wait for manual approval, and auto-merge waits with them.
+- **Settings → General → Pull Requests → "Allow auto-merge"** turned on.
+- At least one required status check in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
 
 **What you should see:**
 

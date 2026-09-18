@@ -1,10 +1,10 @@
 # Token and permissions
 
-A PR opened with the default `GITHUB_TOKEN` gets no CI checks. If you want checks on the PR this action opens, use a fine-grained PAT or a GitHub App installation token instead, passed to **both** `actions/checkout` and this action.
+A PR opened with the default `GITHUB_TOKEN` gets no automatic CI checks. If you want checks on the PR this action opens, use a fine-grained PAT or a GitHub App installation token instead, passed to **both** `actions/checkout` and this action.
 
 ## Why `GITHUB_TOKEN` isn't enough
 
-A pull request opened with the default, ephemeral `GITHUB_TOKEN` does **not** trigger other `pull_request` (or `pull_request_target`) workflows — this is a deliberate GitHub Actions restriction to stop workflows from recursively triggering themselves. If you rely on CI checks running against the PR this action opens, `GITHUB_TOKEN` alone will leave it with no checks at all.
+A pull request opened with the default, ephemeral `GITHUB_TOKEN` does trigger `pull_request` (and `pull_request_target`) workflow runs. GitHub holds those runs in an **approval-required** state instead of starting them — a deliberate restriction so workflows can't recursively trigger themselves. A user with write access must open the PR and select **Approve workflows to run** before they start. See [GitHub's docs on `GITHUB_TOKEN`](https://docs.github.com/en/actions/concepts/security/github_token). Without a PAT, your CI checks on this action's PR wait for that manual approval every time.
 
 ## Use a PAT or App token
 
