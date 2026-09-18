@@ -590,7 +590,10 @@ def test_update_transitive_failure_creates_a_managed_issue(tmp_path):
     run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
 
     assert len(gh_issues.create_calls) == 1
-    assert gh_issues.create_calls[0]["title"].startswith("transitive-dependencies:")
+    assert (
+        gh_issues.create_calls[0]["title"]
+        == "transitive dependencies: lock-wide refresh fails (resolution)"
+    )
     assert "boom" in gh_issues.create_calls[0]["body"]
     content = output_file.read_text()
     assert '"status": "failed"' in content
@@ -669,6 +672,51 @@ def test_known_group_names_pass_validation_and_the_run_proceeds(tmp_path):
         """
     )
     cfg = make_cfg(directory=str(tmp_path), dry_run=True, without_groups="dev")
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=FakeGithubPR())
+
+    assert backend.install_calls == 1
+
+
+def test_pep735_group_rejected_when_poetry_version_too_old(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """
+    )
+    cfg = make_cfg(directory=str(tmp_path), poetry_version="2.1.4", only_groups="test")
+    backend = FakeBackend(update_ok={"a": True})
+
+    with pytest.raises(ActionError, match="poetry-version >= 2.2"):
+        run(cfg, runner=FakeRunner(), backend=backend, git=FakeGit(), gh=FakeGithubPR())
+
+    assert backend.install_calls == 0
+
+
+def test_pep735_group_accepted_when_poetry_version_new_enough(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """
+    )
+    cfg = make_cfg(
+        directory=str(tmp_path),
+        dry_run=True,
+        poetry_version="2.4.3",
+        only_groups="test",
+    )
     backend = FakeBackend(update_ok={"a": True})
     git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
 

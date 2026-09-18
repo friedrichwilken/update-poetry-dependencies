@@ -14,39 +14,7 @@ from .github_pr import GithubPR, create_or_edit, parse_created_pr_number
 from .groups import check_group_selection, check_known_groups
 from .report import MAX_SUMMARY_CHARS, render_body, write_outputs
 from .runner import CommandRunner
-from .updater import PackageOutcome, UpdateResult, run_transitive_update, run_updates
-
-# A synthetic PackageOutcome name for the update-transitive step (issue
-# #24), used only to feed create-issues' existing per-package decision
-# table (plan_issue_actions) - never part of result.outcomes/report-json/
-# the PR body (see report.py/updater.TransitiveOutcome for why the real
-# report never treats it as a package). Already a valid PEP-503-normalized
-# name, matching github_issues._VALID_NORMALIZED_NAME_RE.
-TRANSITIVE_ISSUE_PACKAGE = "transitive-dependencies"
-
-
-def _issue_outcomes(result: UpdateResult) -> list[PackageOutcome]:
-    """`result.outcomes` plus, only when the update-transitive step itself
-    failed this run, one synthetic `PackageOutcome` so create-issues (see
-    `TRANSITIVE_ISSUE_PACKAGE` above) can file/update an issue for it
-    exactly like any other failed package - and, symmetrically, close that
-    issue automatically once the step passes again (or is unchanged): the
-    synthetic outcome then no longer appears here at all, and
-    `plan_issue_actions`'s own "no target this run -> close" rule already
-    handles the rest without github_issues.py needing to know this feature
-    exists."""
-    transitive = result.transitive
-    if transitive is None or transitive.status != "failed":
-        return result.outcomes
-    return [
-        *result.outcomes,
-        PackageOutcome(
-            name=TRANSITIVE_ISSUE_PACKAGE,
-            status="failed",
-            failure_kind=transitive.failure_kind,
-            output_tail=transitive.output_tail,
-        ),
-    ]
+from .updater import UpdateResult, run_transitive_update, run_updates
 
 
 def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=None) -> int:
@@ -68,7 +36,14 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
     without_groups = parse_labels(cfg.without_groups)
     only_groups = parse_labels(cfg.only_groups)
     check_group_selection(with_groups, without_groups, only_groups)
-    check_known_groups(package_manager, cfg.directory, with_groups, without_groups, only_groups)
+    check_known_groups(
+        package_manager,
+        cfg.directory,
+        with_groups,
+        without_groups,
+        only_groups,
+        poetry_version=cfg.poetry_version,
+    )
 
     runner = runner or CommandRunner()
     if backend is None:
@@ -233,7 +208,13 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
         if cfg.create_issues:
             try:
                 issue_actions, issue_errors = run_issue_management(
-                    cfg, runner, _issue_outcomes(result), run_url, pr_url, gh_issues=gh_issues
+                    cfg,
+                    runner,
+                    result.outcomes,
+                    run_url,
+                    pr_url,
+                    gh_issues=gh_issues,
+                    transitive=result.transitive,
                 )
             except Exception as exc:  # deliberately broad - see the comment above
                 print(f"::warning::create-issues: failed to manage issues: {exc}")

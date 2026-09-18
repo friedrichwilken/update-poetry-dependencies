@@ -36,8 +36,20 @@ import tomllib
 from pathlib import Path
 
 from .errors import ActionError
+from .versions import version_at_least
 
 MAIN_GROUP = "main"
+
+# PEP 735 `[dependency-groups]` support was added in Poetry 2.2.0 - "Add
+# support for PEP 735 dependency groups" (poetry#10130),
+# https://github.com/python-poetry/poetry/releases/tag/2.2.0. Verified
+# empirically too: poetry==2.1.4 silently ignores the whole table (a
+# package declared only there never even reaches the lock file, and
+# `poetry show --only <name>` fails with "Group(s) not found"); poetry==2.2.0
+# honors it exactly like a `[tool.poetry.group.<name>]` table. A name that
+# only exists in `[dependency-groups]` is therefore not a real, selectable
+# group for an older poetry-version - see `poetry_known_groups`.
+MIN_POETRY_VERSION_FOR_DEPENDENCY_GROUPS = "2.2"
 
 
 def check_group_selection(
@@ -53,19 +65,20 @@ def check_group_selection(
         )
 
 
-def poetry_known_groups(data: dict) -> set[str]:
+def poetry_known_groups(data: dict, poetry_version: str) -> set[str]:
     """Every group name valid for `--with`/`--without`/`--only` against this
     `pyproject.toml`, parsed with `tomllib` - `"main"`, every
     `[tool.poetry.group.<g>]` name, `"dev"` if `[tool.poetry.dev-dependencies]`
-    is present, and every `[dependency-groups]` (PEP 735) name Poetry >= 2
-    also honors for its own `--with`/`--without`/`--only` (verified against
-    real poetry==2.4.3)."""
+    is present, and, only when `poetry_version` actually supports it (see
+    `MIN_POETRY_VERSION_FOR_DEPENDENCY_GROUPS` above), every
+    `[dependency-groups]` (PEP 735) name too."""
     tool_poetry = (data.get("tool") or {}).get("poetry") or {}
     groups = {MAIN_GROUP}
     groups |= set((tool_poetry.get("group") or {}).keys())
     if tool_poetry.get("dev-dependencies"):
         groups.add("dev")
-    groups |= set((data.get("dependency-groups") or {}).keys())
+    if version_at_least(poetry_version, MIN_POETRY_VERSION_FOR_DEPENDENCY_GROUPS):
+        groups |= set((data.get("dependency-groups") or {}).keys())
     return groups
 
 
@@ -89,10 +102,16 @@ def check_known_groups(
     with_groups: list[str],
     without_groups: list[str],
     only_groups: list[str],
+    poetry_version: str = "",
 ) -> None:
     """Fails fast, before any work, if a requested group name does not
     exist in the project's `pyproject.toml` - never silently ignored.
-    A no-op (and no file read at all) when no group input is set."""
+    A no-op (and no file read at all) when no group input is set.
+    `poetry_version` is only ever consulted for the poetry backend (see
+    `poetry_known_groups`) - a `[dependency-groups]` (PEP 735) name gets
+    its own, more specific error when it is right there in the file but
+    invisible to this run's `poetry-version`, rather than being reported
+    as if it did not exist at all."""
     requested = set(with_groups) | set(without_groups) | set(only_groups)
     if not requested:
         return
@@ -107,14 +126,34 @@ def check_known_groups(
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
         raise ActionError(f"could not parse {pyproject_path}: {exc}") from None
 
-    known = poetry_known_groups(data) if package_manager == "poetry" else uv_known_groups(data)
-    unknown = sorted(requested - known)
-    if unknown:
-        raise ActionError(
-            f"unknown dependency group(s) for the {package_manager} backend in "
-            f"{pyproject_path}: {', '.join(unknown)}; known groups: "
-            f"{', '.join(sorted(known)) or '(none)'}"
-        )
+    if package_manager == "poetry":
+        known = poetry_known_groups(data, poetry_version)
+        unknown = sorted(requested - known)
+        if not unknown:
+            return
+        pep735_names = set((data.get("dependency-groups") or {}).keys())
+        version_blocked = sorted(set(unknown) & pep735_names)
+        if version_blocked and not version_at_least(
+            poetry_version, MIN_POETRY_VERSION_FOR_DEPENDENCY_GROUPS
+        ):
+            raise ActionError(
+                f"dependency group(s) {', '.join(version_blocked)} are declared in "
+                f"[dependency-groups] in {pyproject_path}, but PEP 735 dependency groups "
+                f"require poetry-version >= {MIN_POETRY_VERSION_FOR_DEPENDENCY_GROUPS} "
+                f"(this run uses poetry-version {poetry_version or '(unset)'}); set "
+                "poetry-version to a version that supports them, or select a different group"
+            )
+    else:
+        known = uv_known_groups(data)
+        unknown = sorted(requested - known)
+        if not unknown:
+            return
+
+    raise ActionError(
+        f"unknown dependency group(s) for the {package_manager} backend in "
+        f"{pyproject_path}: {', '.join(unknown)}; known groups: "
+        f"{', '.join(sorted(known)) or '(none)'}"
+    )
 
 
 def poetry_group_args(

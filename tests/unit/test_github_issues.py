@@ -6,6 +6,7 @@ from fakes import FakeGithubIssues
 from updater.errors import ActionError
 from updater.github_issues import (
     _MANAGED_BY_FOOTER,
+    TRANSITIVE_ISSUE_PACKAGE,
     GithubIssues,
     IssueAction,
     IssueTarget,
@@ -19,9 +20,10 @@ from updater.github_issues import (
     render_issue_title,
     run_issue_management,
     summarize_issue_actions,
+    transitive_issue_target,
 )
 from updater.runner import CommandResult
-from updater.updater import PackageOutcome
+from updater.updater import ChangedTransitivePackage, PackageOutcome, TransitiveOutcome
 
 
 class _RecordingRunner:
@@ -384,6 +386,71 @@ def test_plan_no_duplicate_actions_when_only_one_managed_issue_per_package():
     assert all(a.duplicate_of is None for a in actions)
 
 
+# --- plan_issue_actions: extra_targets / disabled_reasons (issue #24 review fix) --
+
+
+def test_plan_extra_targets_creates_issue_for_a_non_package_marker():
+    target = transitive_issue_target(TransitiveOutcome(status="failed", failure_kind="test"))
+    actions = plan_issue_actions([], [], extra_targets={TRANSITIVE_ISSUE_PACKAGE: target})
+    assert len(actions) == 1
+    assert actions[0].package == TRANSITIVE_ISSUE_PACKAGE
+    assert actions[0].action == "create"
+    assert actions[0].target is target
+
+
+def test_plan_extra_targets_updates_an_existing_managed_issue_for_the_marker():
+    target = transitive_issue_target(TransitiveOutcome(status="failed", failure_kind="test"))
+    existing = [
+        ManagedIssue(
+            number=9, package=TRANSITIVE_ISSUE_PACKAGE, last_version="", last_kind="resolution"
+        )
+    ]
+    actions = plan_issue_actions([], existing, extra_targets={TRANSITIVE_ISSUE_PACKAGE: target})
+    assert len(actions) == 1
+    assert actions[0].action == "update"
+    assert actions[0].issue == 9
+    assert actions[0].comment is True  # kind changed: resolution -> test
+
+
+def test_plan_closes_marker_issue_with_no_target_and_no_disabled_reason():
+    """Normal case: the step ran and passed (or was unchanged) this run,
+    so there is no target and no disabled_reasons entry either - the
+    ordinary "no longer failing" close comment applies (close_reason is
+    None)."""
+    existing = [
+        ManagedIssue(number=9, package=TRANSITIVE_ISSUE_PACKAGE, last_version="", last_kind="test")
+    ]
+    actions = plan_issue_actions([], existing)
+    assert len(actions) == 1
+    assert actions[0].action == "close"
+    assert actions[0].close_reason is None
+
+
+def test_plan_closes_marker_issue_with_disabled_reason_when_feature_off():
+    existing = [
+        ManagedIssue(number=9, package=TRANSITIVE_ISSUE_PACKAGE, last_version="", last_kind="test")
+    ]
+    actions = plan_issue_actions(
+        [],
+        existing,
+        disabled_reasons={TRANSITIVE_ISSUE_PACKAGE: "update-transitive is disabled"},
+    )
+    assert len(actions) == 1
+    assert actions[0].action == "close"
+    assert actions[0].close_reason == "update-transitive is disabled"
+
+
+def test_plan_disabled_reasons_only_applies_to_the_named_package():
+    outcomes = [_outcome(name="idna", status="updated")]  # no target -> would close if managed
+    existing = [ManagedIssue(number=5, package="idna", last_version="4.0.0", last_kind="test")]
+    actions = plan_issue_actions(
+        outcomes, existing, disabled_reasons={TRANSITIVE_ISSUE_PACKAGE: "irrelevant here"}
+    )
+    assert len(actions) == 1
+    assert actions[0].package == "idna"
+    assert actions[0].close_reason is None
+
+
 # --- issue_actions_to_json --------------------------------------------------
 
 
@@ -483,6 +550,84 @@ def test_render_issue_body_escapes_pipe_in_package_name():
     target = IssueTarget("weird|name", False, None, None, "test", "")
     body = render_issue_body(target, "run", None, "now")
     assert "weird\\|name" in body
+
+
+# --- transitive-dependencies issue rendering (issue #24 review fix) --------
+
+
+def test_transitive_issue_target_none_when_not_failed():
+    assert transitive_issue_target(None) is None
+    assert transitive_issue_target(TransitiveOutcome(status="unchanged")) is None
+    assert transitive_issue_target(TransitiveOutcome(status="updated")) is None
+
+
+def test_transitive_issue_target_built_from_failed_outcome():
+    outcome = TransitiveOutcome(
+        status="failed",
+        failure_kind="test",
+        output_tail="boom",
+        changed_packages=[ChangedTransitivePackage(name="idna", old="3.3", new="3.4")],
+    )
+    target = transitive_issue_target(outcome)
+    assert target.package == TRANSITIVE_ISSUE_PACKAGE
+    assert target.kind == "transitive"
+    assert target.failure_kind == "test"
+    assert target.output_tail == "boom"
+    assert target.changed_packages == (ChangedTransitivePackage(name="idna", old="3.3", new="3.4"),)
+
+
+def test_render_issue_title_transitive_is_not_the_generic_shape():
+    target = transitive_issue_target(TransitiveOutcome(status="failed", failure_kind="resolution"))
+    assert (
+        render_issue_title(target)
+        == "transitive dependencies: lock-wide refresh fails (resolution)"
+    )
+
+
+def test_render_issue_body_transitive_lists_changed_packages_before_output():
+    target = transitive_issue_target(
+        TransitiveOutcome(
+            status="failed",
+            failure_kind="test",
+            output_tail="assertion failed",
+            changed_packages=[
+                ChangedTransitivePackage(name="idna", old="3.3", new="3.4"),
+                ChangedTransitivePackage(name="six", old="1.15.0", new="1.17.0"),
+            ],
+        )
+    )
+    body = render_issue_body(target, "https://example/run/1", None, "2026-01-01")
+
+    assert f"<!-- test-gated-updates:pkg={TRANSITIVE_ISSUE_PACKAGE} -->" in body
+    assert "idna" in body and "3.3" in body and "3.4" in body
+    assert "six" in body and "1.15.0" in body and "1.17.0" in body
+    # the changed-packages list must come before the captured output block
+    assert body.index("idna") < body.index("assertion failed")
+    assert "assertion failed" in body
+
+
+def test_render_issue_body_transitive_caps_changed_packages_list():
+    changed = [
+        ChangedTransitivePackage(name=f"pkg-{i}", old="1.0.0", new="1.0.1") for i in range(75)
+    ]
+    target = transitive_issue_target(
+        TransitiveOutcome(status="failed", failure_kind="test", changed_packages=changed)
+    )
+    body = render_issue_body(target, "run", None, "now")
+    assert "pkg-0" in body
+    assert "more changed package(s)" in body
+
+
+def test_render_issue_body_transitive_handles_no_changed_packages():
+    """A resolution failure never gets as far as computing a diff (see
+    run_transitive_update) - the body must still render sensibly."""
+    target = transitive_issue_target(
+        TransitiveOutcome(
+            status="failed", failure_kind="resolution", output_tail="could not resolve"
+        )
+    )
+    body = render_issue_body(target, "run", None, "now")
+    assert "could not resolve" in body
 
 
 def test_render_issue_body_neutralizes_literal_details_close_tag_in_output_tail():
@@ -689,6 +834,31 @@ def test_execute_close_uses_duplicate_comment_when_duplicate_of_is_set():
     assert "Duplicate of #7" in gh.close_calls[0]["comment"]
 
 
+def test_execute_close_uses_close_reason_when_set():
+    """Issue #24 review fix (item 4): closing a marker issue because its
+    producing feature is disabled must say so, not claim "no longer
+    failing" (untrue - nothing was checked)."""
+    gh = FakeGithubIssues()
+    actions = [
+        IssueAction(
+            package=TRANSITIVE_ISSUE_PACKAGE,
+            action="close",
+            issue=9,
+            close_reason="update-transitive is disabled as of this run - closing automatically.",
+        )
+    ]
+    execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=False)
+    assert "update-transitive is disabled" in gh.close_calls[0]["comment"]
+    assert "No longer failing" not in gh.close_calls[0]["comment"]
+
+
+def test_execute_close_falls_back_to_no_longer_failing_when_no_reason_given():
+    gh = FakeGithubIssues()
+    actions = [IssueAction(package="idna", action="close", issue=9)]
+    execute_issue_actions(gh, actions, "run", None, [], "now", dry_run=False)
+    assert "No longer failing" in gh.close_calls[0]["comment"]
+
+
 def test_execute_isolates_a_failing_action_and_continues_with_the_rest():
     """Item 2 of the follow-up review: one failing gh call must not abort
     the rest of the plan, and the failure must still be reported."""
@@ -773,11 +943,19 @@ def test_summarize_issue_actions_counts_failed():
 
 
 class _Cfg:
-    def __init__(self, create_issues=True, issue_labels="", dry_run=False, directory="."):
+    def __init__(
+        self,
+        create_issues=True,
+        issue_labels="",
+        dry_run=False,
+        directory=".",
+        update_transitive=False,
+    ):
         self.create_issues = create_issues
         self.issue_labels = issue_labels
         self.dry_run = dry_run
         self.directory = directory
+        self.update_transitive = update_transitive
 
 
 def test_run_issue_management_returns_empty_when_feature_off():
@@ -842,3 +1020,96 @@ def test_run_issue_management_surfaces_a_per_action_error_without_raising():
     assert len(actions) == 1
     assert actions[0].error is not None
     assert len(errors) == 1
+
+
+# --- run_issue_management: update-transitive integration (issue #24 review) --
+
+
+def test_run_issue_management_files_issue_for_failed_transitive_step():
+    transitive = TransitiveOutcome(status="failed", failure_kind="resolution", output_tail="boom")
+    gh = FakeGithubIssues(open_managed=[], created_issue_number=77)
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=True, update_transitive=True),
+        None,
+        [],
+        "run",
+        None,
+        gh_issues=gh,
+        transitive=transitive,
+    )
+    assert len(actions) == 1
+    assert actions[0].package == TRANSITIVE_ISSUE_PACKAGE
+    assert actions[0].action == "create"
+    assert errors == []
+    assert (
+        gh.create_calls[0]["title"]
+        == "transitive dependencies: lock-wide refresh fails (resolution)"
+    )
+
+
+def test_run_issue_management_closes_transitive_issue_once_it_passes_again():
+    existing = [
+        ManagedIssue(
+            number=77, package=TRANSITIVE_ISSUE_PACKAGE, last_version="", last_kind="resolution"
+        )
+    ]
+    gh = FakeGithubIssues(open_managed=existing)
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=True, update_transitive=True),
+        None,
+        [],
+        "run",
+        None,
+        gh_issues=gh,
+        transitive=TransitiveOutcome(status="unchanged"),
+    )
+    assert len(actions) == 1
+    assert actions[0].action == "close"
+    assert actions[0].close_reason is None
+    assert "No longer failing" in gh.close_calls[0]["comment"]
+
+
+def test_run_issue_management_closes_transitive_issue_truthfully_when_feature_disabled():
+    """The exact transition the review flagged: an issue was opened while
+    update-transitive was on and failing; a later run disables the
+    feature entirely. The issue must still be closed (nothing tracks it
+    any more), but the close comment must not claim "no longer failing" -
+    nothing was actually checked this run."""
+    existing = [
+        ManagedIssue(
+            number=77, package=TRANSITIVE_ISSUE_PACKAGE, last_version="", last_kind="resolution"
+        )
+    ]
+    gh = FakeGithubIssues(open_managed=existing)
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=True, update_transitive=False),
+        None,
+        [],
+        "run",
+        None,
+        gh_issues=gh,
+        transitive=None,
+    )
+    assert len(actions) == 1
+    assert actions[0].action == "close"
+    assert actions[0].close_reason is not None
+    assert "disabled" in actions[0].close_reason
+    comment = gh.close_calls[0]["comment"]
+    assert "disabled" in comment
+    assert "No longer failing" not in comment
+
+
+def test_run_issue_management_transitive_disabled_and_no_existing_issue_does_nothing():
+    gh = FakeGithubIssues(open_managed=[])
+    actions, errors = run_issue_management(
+        _Cfg(create_issues=True, update_transitive=False),
+        None,
+        [],
+        "run",
+        None,
+        gh_issues=gh,
+        transitive=None,
+    )
+    assert actions == []
+    assert gh.close_calls == []
+    assert gh.create_calls == []

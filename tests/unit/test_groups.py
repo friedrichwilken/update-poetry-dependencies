@@ -49,16 +49,28 @@ def test_poetry_known_groups_includes_main_and_declared_groups():
     data = {
         "tool": {"poetry": {"group": {"dev": {}, "docs": {}}, "dev-dependencies": {"idna": "*"}}}
     }
-    assert poetry_known_groups(data) == {"main", "dev", "docs"}
+    assert poetry_known_groups(data, "2.4.3") == {"main", "dev", "docs"}
 
 
-def test_poetry_known_groups_includes_pep735_dependency_groups():
+def test_poetry_known_groups_includes_pep735_dependency_groups_when_supported():
     data = {"dependency-groups": {"test": ["pytest"]}}
-    assert poetry_known_groups(data) == {"main", "test"}
+    assert poetry_known_groups(data, "2.2.0") == {"main", "test"}
+    assert poetry_known_groups(data, "2.4.3") == {"main", "test"}
+
+
+def test_poetry_known_groups_excludes_pep735_dependency_groups_when_too_old():
+    """PEP 735 [dependency-groups] support was added in Poetry 2.2.0 (see
+    groups.py's own citation) - verified empirically too, against real
+    poetry==2.1.4 (does not see it at all) vs poetry==2.2.0 (does)."""
+    data = {"dependency-groups": {"test": ["pytest"]}}
+    assert poetry_known_groups(data, "2.1.4") == {"main"}
+    assert poetry_known_groups(data, "2.1.3") == {"main"}
+    assert poetry_known_groups(data, "1.8.3") == {"main"}
+    assert poetry_known_groups(data, "") == {"main"}
 
 
 def test_poetry_known_groups_is_just_main_for_a_plain_project():
-    assert poetry_known_groups({}) == {"main"}
+    assert poetry_known_groups({}, "2.4.3") == {"main"}
 
 
 def test_uv_known_groups_includes_main_dependency_groups_and_legacy_dev():
@@ -101,6 +113,57 @@ def test_check_known_groups_rejects_unknown_poetry_group(tmp_path):
     write(tmp_path, '[project]\nname = "x"\ndependencies = []\n')
     with pytest.raises(ActionError, match="unknown dependency group"):
         check_known_groups("poetry", str(tmp_path), [], [], ["doesnotexist"])
+
+
+def test_check_known_groups_accepts_pep735_group_with_a_new_enough_poetry_version(tmp_path):
+    write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """,
+    )
+    check_known_groups("poetry", str(tmp_path), [], [], ["test"], poetry_version="2.2.0")
+    check_known_groups("poetry", str(tmp_path), [], [], ["test"], poetry_version="2.4.3")
+
+
+def test_check_known_groups_rejects_pep735_group_with_too_old_a_poetry_version(tmp_path):
+    write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """,
+    )
+    with pytest.raises(ActionError, match="poetry-version >= 2.2") as excinfo:
+        check_known_groups("poetry", str(tmp_path), [], [], ["test"], poetry_version="2.1.4")
+    assert "test" in str(excinfo.value)
+    assert "[dependency-groups]" in str(excinfo.value)
+
+
+def test_check_known_groups_pep735_version_gate_does_not_affect_uv(tmp_path):
+    """poetry_version is only ever consulted for the poetry backend - a
+    [dependency-groups] name is always valid for uv regardless of it."""
+    write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """,
+    )
+    check_known_groups("uv", str(tmp_path), [], [], ["test"], poetry_version="1.0.0")
 
 
 def test_check_known_groups_accepts_known_uv_groups(tmp_path):
