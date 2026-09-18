@@ -567,6 +567,8 @@ def write_outputs(
     summary_body: str | None = None,
     issue_actions_json: str = "[]",
     transitive_report: str | None = None,
+    pr_number: int | None = None,
+    pr_url: str = "",
 ) -> None:
     """`issue_actions_json` defaults to an empty JSON array so every
     existing call site (the early always-write guard in `run()`, the
@@ -578,7 +580,15 @@ def write_outputs(
     derived from `result.transitive` itself (`transitive_report_json`) -
     every call site can simply pass `result` and get the right value
     without needing to know about `update-transitive` either; explicit
-    values only exist for tests exercising `write_outputs` directly."""
+    values only exist for tests exercising `write_outputs` directly.
+
+    `pr_number`/`pr_url` default to `None`/`""` - empty outputs - for the
+    exact same reason: the early always-write guard and the `UpdateAborted`
+    path in `run()` never got as far as the PR create/edit step, so they
+    have nothing to report; only the one successful path that actually ran
+    (or dry-ran) that step passes real values. `run()` derives both from a
+    single computation (see its own comment) so the two outputs can never
+    disagree with each other or with what a managed issue's body links to."""
     if transitive_report is None:
         transitive_report = transitive_report_json(result.transitive)
     if output_path:
@@ -590,6 +600,8 @@ def write_outputs(
             fh.write(f"report-json={report_json(result)}\n")
             fh.write(f"issue-actions={issue_actions_json}\n")
             fh.write(f"transitive-report={transitive_report}\n")
+            fh.write(f"pr-number={pr_number if pr_number is not None else ''}\n")
+            fh.write(f"pr-url={pr_url}\n")
             delimiter = f"ghadelim_{secrets.token_hex(16)}"
             fh.write(f"pr-body<<{delimiter}\n{body}\n{delimiter}\n")
 

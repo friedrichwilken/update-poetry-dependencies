@@ -8,12 +8,27 @@ Every output this action sets. Generated from `action.yml`.
 | `failed-packages` | Comma separated list of packages whose update or test failed and were discarded. |
 | `skipped-packages` | Comma separated list of packages that had nothing to update. |
 | `held-back-packages` | Comma separated list of packages where an update beyond the declared constraint was attempted (`allow-major`) but held back — the package may still show up in `passed-packages`/`failed-packages`/`skipped-packages` for the in-range update that ran instead. |
+| `pr-number` | The number of the PR this run created or edited. Empty in `dry-run`, when nothing was pushed, or on a failure before the PR step. |
+| `pr-url` | The URL of the PR this run created or edited. Same emptiness rules as `pr-number`. |
 | `pr-body` | The rendered report / PR body. |
 | `report-json` | JSON array of per-package update records. Schema below. |
 | `issue-actions` | JSON array of planned/performed `create-issues` actions. Schema below. |
 | `transitive-report` | A single JSON object reporting the `update-transitive` step, or the JSON literal `null`. Schema below. |
 
 The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`. See [The report](pr-report.md) for how `pr-body` and the job summary are rendered and budgeted.
+
+## Using `pr-url`
+
+Give the action step an `id` and act on the PR from a later step in the same job — e.g. auto-merge it once checks pass:
+
+```yaml
+      - name: Auto-merge when checks pass
+        if: steps.update.outputs.pr-url != ''
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ steps.update.outputs.pr-url }}
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}
+```
 
 ## `report-json`
 

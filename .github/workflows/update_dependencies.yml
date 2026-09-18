@@ -27,6 +27,7 @@ jobs:
         run: gh label create dependencies --color 0366d6 --description "Dependency updates" --force
 
       - name: Update this repo's own dependencies
+        id: update
         uses: ./
         with:
           python-version: '3.14'
@@ -35,3 +36,10 @@ jobs:
           test-command: 'uv run pytest tests/unit && uv run ruff check .'
           pr-labels: 'dependencies'
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN || github.token }}
+
+      - name: Auto-merge when checks pass
+        if: steps.update.outputs.pr-url != ''
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ steps.update.outputs.pr-url }}
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN || github.token }}

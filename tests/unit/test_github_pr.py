@@ -1,6 +1,6 @@
 from fakes import FakeGithubPR
 
-from updater.github_pr import GithubPR, create_or_edit
+from updater.github_pr import GithubPR, create_or_edit, parse_created_pr_number
 from updater.runner import CommandResult
 
 
@@ -84,3 +84,28 @@ def test_edit_omits_add_label_when_no_labels_given():
     gh.edit(7, "title", "body")
 
     assert "--add-label" not in runner.calls[-1]
+
+
+# --- parse_created_pr_number ------------------------------------------------
+
+
+def test_parse_created_pr_number_from_url_only():
+    stdout = "https://github.com/owner/repo/pull/42\n"
+    assert parse_created_pr_number(stdout) == 42
+
+
+def test_parse_created_pr_number_with_leading_lines_before_the_url():
+    # A stray leading line (e.g. a warning) before the URL must not break
+    # parsing - only the last line is expected to carry the URL.
+    stdout = "Warning: 1 uncommitted change\nhttps://github.com/owner/repo/pull/42\n"
+    assert parse_created_pr_number(stdout) == 42
+
+
+def test_parse_created_pr_number_on_a_github_enterprise_server_host():
+    stdout = "https://github.example.com/owner/repo/pull/99\n"
+    assert parse_created_pr_number(stdout) == 99
+
+
+def test_parse_created_pr_number_returns_none_when_no_url_is_present():
+    assert parse_created_pr_number("no PR URL in this output\n") is None
+    assert parse_created_pr_number("") is None

@@ -3,6 +3,7 @@ import json
 import pytest
 from fakes import FakeBackend, FakeGit, FakeGithubIssues, FakeGithubPR, FakeRunner
 
+import updater.__main__ as main_module
 from updater.__main__ import run
 from updater.config import Config
 from updater.errors import ActionError
@@ -228,6 +229,176 @@ def test_outputs_are_always_written_even_on_early_failure(tmp_path):
     assert "pr-body<<" in content
 
 
+# --- pr-number / pr-url outputs (issue #43) -------------------------------
+
+
+def _output_value(output_file, key: str) -> str:
+    """GITHUB_OUTPUT is append-only and last-write-wins per key - `run()`
+    always writes an empty-result guard first (see its own comment), so the
+    real value (if any) is whichever `<key>=` line comes last."""
+    content = output_file.read_text()
+    lines = [line for line in content.splitlines() if line.startswith(f"{key}=")]
+    return lines[-1][len(key) + 1 :]
+
+
+def test_pr_number_and_pr_url_outputs_on_create(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None, created_pr_url="https://github.com/owner/repo/pull/42")
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == "42"
+    assert _output_value(output_file, "pr-url") == "https://github.com/owner/repo/pull/42"
+
+
+def test_pr_number_and_pr_url_outputs_on_edit(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=7)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == "7"
+    assert _output_value(output_file, "pr-url") == "https://github.com/owner/repo/pull/7"
+
+
+def test_pr_number_and_pr_url_outputs_empty_in_dry_run(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=True, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+
+
+def test_pr_number_and_pr_url_outputs_empty_when_nothing_to_push(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[False], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+
+
+def test_pr_number_and_pr_url_outputs_empty_with_warning_when_create_output_unparsable(
+    tmp_path, capsys
+):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None, created_pr_url="no PR URL in this output")
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "::warning::" in capsys.readouterr().out
+
+
+def test_pr_number_and_pr_url_outputs_empty_when_run_aborts_before_pr_step(tmp_path):
+    """a passes (and is committed) before b fails to re-sync and aborts the
+    run - the PR step is never reached, so both outputs stay empty even
+    though a commit was made locally."""
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, test_command="", github_output=str(output_file))
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False}, sync_ok=False, versions={"a": ["1.0.0", "1.1.0"]}
+    )
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+
+
+def _run_main_with_fakes(monkeypatch, cfg, backend, git, gh):
+    """Drives `main()` itself (not `run()` directly), with fakes swapped in
+    for every real collaborator `main()` would otherwise construct
+    (`CommandRunner`, `bootstrap`, `make_backend`, `GitRepo`, `GithubPR`),
+    so a test can assert on `main()`'s own exit code - not just that
+    `run()` raises - while still never touching a shell, filesystem or
+    network. `cfg.package_manager` must stay an explicit 'poetry'/'uv'
+    (never 'auto'): `detect_package_manager()` only touches the filesystem
+    in the 'auto' case, which none of these fakes exist to serve."""
+    monkeypatch.setattr(main_module, "CommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(main_module, "bootstrap", lambda *a, **kw: None)
+    monkeypatch.setattr(main_module, "make_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr(main_module, "GitRepo", lambda runner, directory: git)
+    monkeypatch.setattr(main_module, "GithubPR", lambda runner, directory: gh)
+    monkeypatch.setattr(main_module.Config, "from_env", classmethod(lambda cls, env=None: cfg))
+    return main_module.main()
+
+
+def test_git_push_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(tmp_path, monkeypatch):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"], push_ok=False)
+    gh = FakeGithubPR(open_pr_number=None)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert git.push_branches == ["deps/test-gated-updates"]
+    assert gh.create_calls == []  # never reached - push failed first
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()  # outputs are still written
+
+
+def test_gh_pr_create_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(
+    tmp_path, monkeypatch
+):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None, create_ok=False)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert len(gh.create_calls) == 1
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()
+
+
+def test_gh_pr_edit_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(
+    tmp_path, monkeypatch
+):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=7, edit_ok=False)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert len(gh.edit_calls) == 1
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()
+
+
 def test_job_summary_is_written_when_github_step_summary_is_set(tmp_path):
     output_file = tmp_path / "output.txt"
     summary_file = tmp_path / "summary.md"
@@ -330,7 +501,8 @@ def test_issue_actions_output_is_empty_when_feature_off(tmp_path):
 def test_report_outputs_are_byte_compatible_when_create_issues_is_off(tmp_path):
     """The only change to the output file when create-issues/update-transitive
     are off is the new, additive `issue-actions=[]`/`transitive-report=null`
-    lines."""
+    lines (and `pr-number`/`pr-url`, issue #43 - always written, unrelated
+    to create-issues)."""
     output_file_off = tmp_path / "off.txt"
     cfg = make_cfg(dry_run=True, create_issues=False, github_output=str(output_file_off))
     backend = FakeBackend(update_ok={"a": True})
@@ -352,6 +524,8 @@ def test_report_outputs_are_byte_compatible_when_create_issues_is_off(tmp_path):
         "report-json",
         "issue-actions",
         "transitive-report",
+        "pr-number",
+        "pr-url",
     }
 
     transitive_line = next(line for line in lines if line.startswith("transitive-report="))

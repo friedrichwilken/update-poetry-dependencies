@@ -5,12 +5,15 @@ carry a `# <-` comment exactly when it is new or changed compared to the
 key) - never on an unrelated, already-introduced line, and never missing
 on a line that really did just change.
 
-The tutorial interleaves two workflow "lineages" (the main `update
-dependencies` workflow, and the `auto-merge dependency updates` workflow
-introduced partway through) - grouped here by `name:` so each is compared
-only against its own most recent prior version, not the other lineage.
-Deliberately a small, dependency-free, line-based scan (stdlib `difflib`
-only) - same style as the other tests/unit/test_docs_*.py checks.
+The tutorial is a single workflow "lineage" (`update dependencies`) grown
+one step at a time - grouped here by `name:` so a step is always compared
+only against its own most recent prior version. Kept as a grouped-by-name
+scan rather than a flat step-by-step diff so a future tutorial step that
+ever does introduce a second workflow (as an earlier revision of step 9's
+auto-merge step used to) is still handled correctly, without special-casing
+either shape. Deliberately a small, dependency-free, line-based scan
+(stdlib `difflib` only) - same style as the other tests/unit/test_docs_*.py
+checks.
 """
 
 from __future__ import annotations
@@ -84,7 +87,7 @@ def changed_line_indices(prev_block: str, new_block: str) -> set[int]:
 def test_tutorial_has_complete_workflow_examples():
     text = TUTORIAL.read_text(encoding="utf-8")
     blocks = [b for b in yaml_blocks(text) if is_complete_workflow(b)]
-    assert len(blocks) >= 2, "expected at least the main workflow and the auto-merge workflow"
+    assert len(blocks) >= 2, "expected at least two complete workflow examples (steps grow one)"
 
 
 def test_arrow_marks_exactly_the_changed_lines_within_each_lineage():

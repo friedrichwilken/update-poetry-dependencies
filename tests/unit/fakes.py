@@ -155,11 +155,16 @@ class FakeGit:
         head_shas: list | None = None,
         current_branch: str = "main",
         uncommitted: bool = False,
+        push_ok: bool = True,
     ):
         self._diff_results = list(diff_results or [])
         self._head_shas = list(head_shas or ["sha0"])
         self._current_branch = current_branch
         self._uncommitted = uncommitted
+        # push_ok=False makes push() return a failing CommandResult (`git
+        # push failed`) - used to test that run() raises ActionError and
+        # never gets far enough to compute a pr-number/pr-url.
+        self._push_ok = push_ok
         self.reset_calls: list[list[str]] = []
         self.hard_reset_calls: list[str] = []
         self.staged_calls: list[list[str]] = []
@@ -207,7 +212,7 @@ class FakeGit:
 
     def push(self, branch: str) -> CommandResult:
         self.push_branches.append(branch)
-        return result(True)
+        return result(self._push_ok, stderr="" if self._push_ok else "fake push failure")
 
 
 class FakeCommandRunner:
@@ -254,9 +259,17 @@ class FakeGithubPR:
         self,
         open_pr_number: int | None = None,
         created_pr_url: str = "https://github.com/owner/repo/pull/123",
+        create_ok: bool = True,
+        edit_ok: bool = True,
     ):
         self.open_pr_number = open_pr_number
         self.created_pr_url = created_pr_url
+        # create_ok/edit_ok=False make create()/edit() return a failing
+        # CommandResult (`gh pr create/edit failed`) - used to test that
+        # run() raises ActionError and never gets far enough to compute a
+        # pr-number/pr-url for that path.
+        self._create_ok = create_ok
+        self._edit_ok = edit_ok
         self.create_calls: list[dict] = []
         self.edit_calls: list[dict] = []
 
@@ -267,6 +280,8 @@ class FakeGithubPR:
         self.create_calls.append(
             {"title": title, "body": body, "base": base, "head": head, "labels": labels}
         )
+        if not self._create_ok:
+            return result(False, stderr="fake gh pr create failure")
         # Mirrors the real `gh pr create`, which prints the new PR's URL as
         # its only stdout line on success (see github_pr.parse_created_pr_number).
         return result(True, stdout=self.created_pr_url)
@@ -275,6 +290,8 @@ class FakeGithubPR:
         self.edit_calls.append(
             {"number": number, "title": title, "body": body, "labels": labels or []}
         )
+        if not self._edit_ok:
+            return result(False, stderr="fake gh pr edit failure")
         return result(True)
 
 

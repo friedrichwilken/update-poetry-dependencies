@@ -37,7 +37,7 @@ Using Poetry? Change `test-command` to `'poetry run pytest'` — everything else
 
 Before the first run:
 - Turn on **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** (off by default).
-- Want your CI to run on the PR? The default `GITHUB_TOKEN` can't trigger it: [use a PAT](docs/manual/token-and-permissions.md).
+- Want your CI to run on the PR by itself? With the default `GITHUB_TOKEN`, GitHub holds those runs for manual approval: [use a PAT](docs/manual/token-and-permissions.md).
 
 ## What you get: one PR with a report
 

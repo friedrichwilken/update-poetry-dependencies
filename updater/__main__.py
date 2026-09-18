@@ -162,6 +162,7 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
     # action's primary product and must not be lost just because a later
     # step failed.
     pr_url: str | None = None
+    pr_number: int | None = None
     issue_actions: list = []
     try:
         if cfg.dry_run:
@@ -191,7 +192,18 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
             pr_number = existing_pr
             if pr_number is None:
                 pr_number = parse_created_pr_number(pr_result.stdout)
+                if pr_number is None:
+                    print(
+                        "::warning::could not parse a PR number from `gh pr create`'s "
+                        "output; the pr-number/pr-url outputs will be empty"
+                    )
             if pr_number is not None:
+                # Same construction for both the create and edit paths (the
+                # only difference is where pr_number itself came from), so
+                # pr-url can never disagree with pr-number - and this is the
+                # one place either is computed; run_issue_management below
+                # reuses this same pr_url for its issue bodies instead of
+                # computing its own.
                 pr_url = f"{cfg.server_url}/{cfg.repository}/pull/{pr_number}"
 
         # Runs after the PR create/edit above (pr_url is known by now, or
@@ -232,6 +244,8 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
             cfg.github_step_summary,
             summary_body=summary_body,
             issue_actions_json=issue_actions_to_json(issue_actions),
+            pr_number=pr_number,
+            pr_url=pr_url or "",
         )
 
     return 0

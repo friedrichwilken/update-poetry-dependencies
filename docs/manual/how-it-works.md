@@ -26,6 +26,8 @@ The action never checks out the repository itself — do that first with `action
 
 `base-branch` defaults to whichever branch is currently checked out; on a detached checkout (e.g. a `pull_request`-triggered run) it falls back to `GITHUB_BASE_REF`, and fails fast if neither is available, before any work happens.
 
+The PR this run created or edited is exposed as the `pr-number`/`pr-url` outputs — empty in `dry-run` or when nothing was pushed — so a later step in the same job can act on it (e.g. auto-merge it). See [Outputs](outputs.md).
+
 ## Bootstrap: everything through `uv`
 
 The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv) and uses `uv` for everything else: it runs its own Python (the updater tool itself) on a fixed, pinned interpreter — independent of your project's `python-version` — then installs your project's `python-version` with `uv python install`, and, for Poetry projects, installs Poetry itself with `uv tool install poetry==<poetry-version>` and creates the project's in-project virtualenv directly with `uv venv --clear`, pinned to that interpreter (Poetry then picks up the existing virtualenv automatically). You do not need `actions/setup-python`, `snok/install-poetry`, or a preinstalled `uv`/`poetry` in your workflow — just check out the repository first.
