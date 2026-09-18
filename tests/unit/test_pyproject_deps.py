@@ -332,3 +332,187 @@ def test_find_pep_declaration_normalizes_name():
 def test_find_pep_declaration_returns_none_when_absent():
     data = {"project": {"dependencies": ["idna>=3.4,<4.0"]}}
     assert find_pep_declaration(data, "nonexistent") is None
+
+
+# --- list_top_level_dependency_names group filtering (issue #4) --------------
+
+
+def _write_grouped(tmp_path):
+    return write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["six"]
+
+        [project.optional-dependencies]
+        cpu = ["numpy"]
+
+        [dependency-groups]
+        dev = ["idna"]
+        docs = ["zipp"]
+
+        [tool.uv]
+        dev-dependencies = ["legacydev"]
+        """,
+    )
+
+
+def test_group_filter_default_includes_everything(tmp_path):
+    path = _write_grouped(tmp_path)
+    assert list_top_level_dependency_names(path) == [
+        "idna",
+        "legacydev",
+        "numpy",
+        "six",
+        "zipp",
+    ]
+
+
+def test_without_groups_excludes_named_group_but_keeps_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("dev",))
+    assert "idna" not in names
+    assert "legacydev" not in names  # tool.uv.dev-dependencies is also "dev"
+    assert "numpy" in names  # an extra - never filtered by groups
+    assert "six" in names
+    assert "zipp" in names
+
+
+def test_without_groups_main_excludes_plain_dependencies(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("main",))
+    assert "six" not in names
+    assert "idna" in names
+
+
+def test_only_groups_restricts_to_named_groups_plus_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, only_groups=("docs",))
+    assert names == ["numpy", "zipp"]  # extras (numpy) are always included
+
+
+def test_only_groups_main_restricts_to_plain_dependencies_plus_extras(tmp_path):
+    path = _write_grouped(tmp_path)
+    names = list_top_level_dependency_names(path, only_groups=("main",))
+    assert names == ["numpy", "six"]
+
+
+def test_with_groups_alone_has_no_effect_on_listing(tmp_path):
+    """Every group is already iterated by default (unlike Poetry's own
+    optional groups), so with_groups has nothing left to add - see
+    list_top_level_dependency_names's own docstring."""
+    path = _write_grouped(tmp_path)
+    assert list_top_level_dependency_names(
+        path, with_groups=("docs",)
+    ) == list_top_level_dependency_names(path)
+
+
+# --- PEP 735 include-group transitivity (issue #4 review fix) ----------------
+
+
+def _write_include_group(tmp_path):
+    """The canonical PEP 735 example: test = ["certifi"], dev = [include
+    test, "six"] - verified against real uv==0.12.14 that `--only-group
+    dev` installs both six and certifi, `--only-group test` installs only
+    certifi, `--no-group test` still installs certifi (via dev's own
+    reach - dev is untouched), and `--all-groups --no-group dev` still
+    installs certifi (via test, still its own active root) but not six."""
+    return write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        test = ["certifi"]
+        dev = [{include-group = "test"}, "six"]
+        """,
+    )
+
+
+def test_include_group_default_includes_everything(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path) == ["certifi", "idna", "six"]
+
+
+def test_include_group_only_dev_pulls_in_test_transitively(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path, only_groups=("dev",)) == ["certifi", "six"]
+
+
+def test_include_group_only_test_does_not_pull_in_dev(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path, only_groups=("test",)) == ["certifi"]
+
+
+def test_include_group_without_test_keeps_certifi_reachable_via_dev(tmp_path):
+    """The surprising one, verified against real uv: excluding "test"
+    does not drop certifi, because "dev" (still active) reaches it
+    transitively - mirrors `uv sync --all-groups --no-group test`."""
+    path = _write_include_group(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("test",))
+    assert names == ["certifi", "idna", "six"]
+
+
+def test_include_group_without_dev_drops_six_but_keeps_certifi(tmp_path):
+    """ "test" is still its own active root (only "dev" was excluded), so
+    certifi (declared directly under "test") stays; six (only declared
+    under "dev") is dropped - mirrors `uv sync --all-groups --no-group dev`."""
+    path = _write_include_group(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("dev",))
+    assert names == ["certifi", "idna"]
+
+
+def test_include_group_nested_multiple_levels(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        a = ["certifi"]
+        b = [{include-group = "a"}, "six"]
+        c = [{include-group = "b"}, "zipp"]
+        """,
+    )
+    names = list_top_level_dependency_names(path, only_groups=("c",))
+    assert names == ["certifi", "six", "zipp"]
+
+
+def test_include_group_cycle_does_not_hang(tmp_path):
+    """A real include-group cycle is rejected by uv itself at lock time
+    (verified: "Detected a cycle in `dependency-groups`") - this must
+    still never loop forever if one somehow reaches this code."""
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        a = [{include-group = "b"}, "certifi"]
+        b = [{include-group = "a"}, "six"]
+        """,
+    )
+    names = list_top_level_dependency_names(path, only_groups=("a",))
+    assert names == ["certifi", "six"]
+
+
+def test_include_group_reference_to_unknown_group_is_harmless(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        dev = [{include-group = "doesnotexist"}, "six"]
+        """,
+    )
+    assert list_top_level_dependency_names(path, only_groups=("dev",)) == ["six"]

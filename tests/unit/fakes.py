@@ -30,6 +30,9 @@ class FakeBackend:
         manifest_file: str = "pyproject.toml",
         update_all_ok: bool | None = None,
         lock_snapshots: list | None = None,
+        update_transitive_ok: bool = True,
+        update_transitive_stdout: str = "",
+        update_transitive_stderr: str = "",
     ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
@@ -70,6 +73,23 @@ class FakeBackend:
         # divergence) unless a test deliberately sets differing snapshots.
         self._lock_snapshots = list(lock_snapshots) if lock_snapshots is not None else [{}]
         self.all_locked_versions_calls = 0
+        # update_transitive() (the update-transitive step, issue #24) -
+        # controllable independently of everything above; the lock
+        # changing or not is still driven by FakeGit.diff_results, exactly
+        # like every other update, and the before/after snapshot a test
+        # wants compared still comes from lock_snapshots above.
+        self._update_transitive_ok = update_transitive_ok
+        self._update_transitive_stdout = update_transitive_stdout
+        self._update_transitive_stderr = update_transitive_stderr
+        self.update_transitive_calls = 0
+
+    def update_transitive(self) -> CommandResult:
+        self.update_transitive_calls += 1
+        return result(
+            self._update_transitive_ok,
+            stdout=self._update_transitive_stdout,
+            stderr=self._update_transitive_stderr,
+        )
 
     def lock_exists(self) -> bool:
         return self._lock_exists

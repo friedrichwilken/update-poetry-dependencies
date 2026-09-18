@@ -11,9 +11,10 @@ from .errors import ActionError, UpdateAborted
 from .git_repo import GitRepo
 from .github_issues import issue_actions_to_json, run_issue_management, summarize_issue_actions
 from .github_pr import GithubPR, create_or_edit, parse_created_pr_number
+from .groups import check_group_selection, check_known_groups
 from .report import MAX_SUMMARY_CHARS, render_body, write_outputs
 from .runner import CommandRunner
-from .updater import UpdateResult, run_updates
+from .updater import UpdateResult, run_transitive_update, run_updates
 
 
 def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=None) -> int:
@@ -25,6 +26,24 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
     package_manager = detect_package_manager(cfg.directory, cfg.package_manager)
     check_versions(package_manager, cfg.python_version, cfg.poetry_version)
     check_strategy(cfg.strategy)
+
+    # Group selection (with-groups/without-groups/only-groups, issue #4) is
+    # validated before any work at all, same as everything else above:
+    # check_group_selection is pure (mutual exclusivity), check_known_groups
+    # reads pyproject.toml (still no bootstrap/install/network) to fail fast
+    # on a group name that does not exist in this project.
+    with_groups = parse_labels(cfg.with_groups)
+    without_groups = parse_labels(cfg.without_groups)
+    only_groups = parse_labels(cfg.only_groups)
+    check_group_selection(with_groups, without_groups, only_groups)
+    check_known_groups(
+        package_manager,
+        cfg.directory,
+        with_groups,
+        without_groups,
+        only_groups,
+        poetry_version=cfg.poetry_version,
+    )
 
     runner = runner or CommandRunner()
     if backend is None:
@@ -85,6 +104,16 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
             allow_major=cfg.allow_major,
             strategy=cfg.strategy,
         )
+        if cfg.update_transitive:
+            # Runs last, once per run, after the top-level loop (either
+            # strategy) and any allow-major beyond-constraint attempts have
+            # both finished (see run_transitive_update's own docstring). A
+            # re-sync failure here raises UpdateAborted exactly like the
+            # top-level loop's own does, so it is handled by the very same
+            # except clause below - result.transitive is already set to
+            # the "failed" outcome that triggered it by the time that
+            # happens (see run_transitive_update), so nothing is lost.
+            run_transitive_update(backend, git, runner, cfg.test_command, cfg.directory, result)
     except UpdateAborted as exc:
         # Some packages were already processed (and, for passing ones,
         # already committed) before the abort - report on that partial
@@ -179,7 +208,13 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
         if cfg.create_issues:
             try:
                 issue_actions, issue_errors = run_issue_management(
-                    cfg, runner, result.outcomes, run_url, pr_url, gh_issues=gh_issues
+                    cfg,
+                    runner,
+                    result.outcomes,
+                    run_url,
+                    pr_url,
+                    gh_issues=gh_issues,
+                    transitive=result.transitive,
                 )
             except Exception as exc:  # deliberately broad - see the comment above
                 print(f"::warning::create-issues: failed to manage issues: {exc}")

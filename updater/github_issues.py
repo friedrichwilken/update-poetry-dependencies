@@ -61,9 +61,22 @@ from .errors import ActionError
 from .pyproject_deps import normalize_name
 from .report import _REASON_LABELS, _cell, _detail_block
 from .runner import CommandRunner
-from .updater import PackageOutcome
+from .updater import ChangedTransitivePackage, PackageOutcome, TransitiveOutcome
 
 IssueActionKind = Literal["create", "update", "close"]
+
+# The reserved, already-normalized package name used for the
+# update-transitive step's own managed issue (issue #24) - never a real
+# top-level package, but a valid normalize_name() output
+# (_VALID_NORMALIZED_NAME_RE below), so it is indistinguishable from a real
+# one to the rest of this module's identity checks.
+TRANSITIVE_ISSUE_PACKAGE = "transitive-dependencies"
+
+# How many changed packages a transitive-dependencies issue body lists
+# before capping with a "N more" note - mirrors report.py's own
+# budgeted-list pattern, just with a fixed count instead of a character
+# budget (an issue body has no comparably tight size limit to guard).
+_MAX_CHANGED_PACKAGES_IN_ISSUE = 50
 
 # GitHub's own limit is much higher, but a title this long has already lost
 # any value as a title - see render_issue_title.
@@ -118,7 +131,17 @@ class IssueTarget:
     computed once from a `PackageOutcome` (see `issue_target_for`) so the
     decision table and the renderers always agree on which of a package's
     two possible failure surfaces - its own `failed` outcome, or a
-    held-back beyond-constraint attempt - an issue is about."""
+    held-back beyond-constraint attempt - an issue is about.
+
+    `kind`/`changed_packages` are additive, only ever set (to `"transitive"`
+    and the refresh's own changed-package list) for the one, reserved
+    `TRANSITIVE_ISSUE_PACKAGE` target built by `transitive_issue_target()`
+    (issue #24) rather than `issue_target_for()` - a failed `update-transitive`
+    lock-wide refresh has no single old/new package version of its own
+    (see `updater.TransitiveOutcome`), so it needs its own title/body shape
+    (`render_issue_title`/`render_issue_body` branch on `kind`) instead of
+    the generic per-package one. Every real package's target keeps the
+    default `kind="package"`."""
 
     package: str  # original (display) name
     held_back: bool
@@ -126,6 +149,8 @@ class IssueTarget:
     attempted_version: str | None
     failure_kind: str | None
     output_tail: str
+    kind: str = "package"  # "package" | "transitive"
+    changed_packages: tuple[ChangedTransitivePackage, ...] = ()
 
 
 @dataclass
@@ -146,6 +171,14 @@ class IssueAction:
     # number, so execute_issue_actions can comment "Duplicate of #<n>."
     # instead of the usual "no longer failing" close comment.
     duplicate_of: int | None = None
+    # Set only for a "close" action whose package has no target this run
+    # because the *feature that would have produced one is itself disabled*
+    # (currently: update-transitive off - see plan_issue_actions'
+    # disabled_reasons and __main__.run()) rather than because it is
+    # genuinely no longer failing - overrides the usual "no longer failing"
+    # close comment with this truthful one instead (never set together with
+    # duplicate_of, which always wins when both could apply).
+    close_reason: str | None = None
     # Set by execute_issue_actions when this action's own gh call(s) failed
     # - the action is still reported (in issue-actions, with this message),
     # just not counted as having actually happened.
@@ -179,6 +212,28 @@ def issue_target_for(outcome: PackageOutcome) -> IssueTarget | None:
             output_tail=outcome.beyond_constraint_output_tail,
         )
     return None
+
+
+def transitive_issue_target(transitive: TransitiveOutcome | None) -> IssueTarget | None:
+    """The `IssueTarget` for the `update-transitive` step's own managed
+    issue (issue #24), keyed by the reserved `TRANSITIVE_ISSUE_PACKAGE`
+    name - built directly from a `TransitiveOutcome`, never routed through
+    `issue_target_for()`/a synthetic `PackageOutcome` (see `IssueTarget`'s
+    own docstring for why). `None` unless the step itself failed this run
+    - `"updated"`/`"unchanged"` need no issue, exactly like a passing/
+    skipped package never gets one from `issue_target_for()` either."""
+    if transitive is None or transitive.status != "failed":
+        return None
+    return IssueTarget(
+        package=TRANSITIVE_ISSUE_PACKAGE,
+        held_back=False,
+        old_version=None,
+        attempted_version=None,
+        failure_kind=transitive.failure_kind,
+        output_tail=transitive.output_tail,
+        kind="transitive",
+        changed_packages=tuple(transitive.changed_packages),
+    )
 
 
 def parse_managed_issues(raw_issues: list[dict]) -> list[ManagedIssue]:
@@ -224,7 +279,10 @@ def parse_managed_issues(raw_issues: list[dict]) -> list[ManagedIssue]:
 
 
 def plan_issue_actions(
-    outcomes: list[PackageOutcome], open_managed_issues: list[ManagedIssue]
+    outcomes: list[PackageOutcome],
+    open_managed_issues: list[ManagedIssue],
+    extra_targets: dict[str, IssueTarget] | None = None,
+    disabled_reasons: dict[str, str] | None = None,
 ) -> list[IssueAction]:
     """Pure decision table, no `gh` calls:
 
@@ -236,7 +294,12 @@ def plan_issue_actions(
       failure kind changed since the issue's last recorded state
     - an existing managed issue whose package has no `IssueTarget` this
       run (it updated, was skipped, or is no longer a top-level
-      dependency at all) -> `close`
+      dependency at all) -> `close`, with a `close_reason` override (see
+      `IssueAction.close_reason`) when `disabled_reasons` names that
+      package - used for a marker package (e.g.
+      `TRANSITIVE_ISSUE_PACKAGE`) whose *producing feature* is itself
+      disabled this run, where the usual "no longer failing" close
+      comment would be untrue (nothing was actually checked)
     - more than one open managed issue for the same package (possible
       because `list_open_managed`'s two lookup paths - and, in principle,
       overlapping runs - are outside this action's control; see the module
@@ -247,6 +310,13 @@ def plan_issue_actions(
       the state marker/managed-by footer) is never returned here in the
       first place - see `parse_managed_issues`.
 
+    `extra_targets` (already-normalized-name -> `IssueTarget`) merges in
+    targets built some other way than `issue_target_for()`/a real
+    `PackageOutcome` - currently only ever `transitive_issue_target()`'s
+    result for `TRANSITIVE_ISSUE_PACKAGE` (issue #24), since a failed
+    lock-wide refresh has no `PackageOutcome` of its own to route through
+    the normal per-package path.
+
     Callers are responsible for not calling this at all for an aborted run
     (the outcome list is partial - see `run_issue_management`) or when the
     feature is disabled.
@@ -256,6 +326,8 @@ def plan_issue_actions(
         target = issue_target_for(outcome)
         if target is not None:
             targets[normalize_name(outcome.name)] = target
+    if extra_targets:
+        targets.update(extra_targets)
 
     by_package: dict[str, list[ManagedIssue]] = defaultdict(list)
     for managed in open_managed_issues:
@@ -300,7 +372,14 @@ def plan_issue_actions(
 
     for package, canonical in canonical_by_package.items():
         if package not in targets:
-            actions.append(IssueAction(package=package, action="close", issue=canonical.number))
+            actions.append(
+                IssueAction(
+                    package=package,
+                    action="close",
+                    issue=canonical.number,
+                    close_reason=(disabled_reasons or {}).get(package),
+                )
+            )
 
     return actions
 
@@ -328,7 +407,17 @@ def render_issue_title(target: IssueTarget) -> str:
     """Truncated to `_MAX_TITLE_LENGTH`: the package name (and its `: `
     separator) is always kept intact - it is what actually identifies the
     issue to a human - only the version/kind tail is cut, with a trailing
-    ellipsis marking the cut."""
+    ellipsis marking the cut.
+
+    `target.kind == "transitive"` (the update-transitive step's own
+    managed issue, issue #24) gets its own, fixed title instead - there is
+    no single package/version this failure is about (see
+    `transitive_issue_target`), so the generic "<pkg>: update to <version>
+    fails (<kind>)" shape would be actively misleading here."""
+    if target.kind == "transitive":
+        kind = target.failure_kind or "failed"
+        return f"transitive dependencies: lock-wide refresh fails ({kind})"
+
     kind = target.failure_kind or "failed"
     version = target.attempted_version or "unknown"
     if target.held_back:
@@ -351,16 +440,72 @@ def render_issue_title(target: IssueTarget) -> str:
     return prefix + tail[:tail_budget] + ellipsis
 
 
+def _issue_footer_lines(
+    target: IssueTarget, run_url: str, pr_url: str | None, last_seen: str
+) -> list[str]:
+    """The trailer every managed issue body shares, regardless of `kind`:
+    the workflow run (and PR, if any) link, "last seen", the managed-by
+    footer, and the state marker `plan_issue_actions` reads back next
+    run."""
+    version_str = target.attempted_version or ""
+    kind_str = target.failure_kind or ""
+    lines = [f"Workflow run: {run_url}"]
+    if pr_url:
+        lines.append(f"Pull request: {pr_url}")
+    lines.append(f"Last seen: {last_seen}")
+    lines.append("")
+    lines.append(_MANAGED_BY_FOOTER)
+    lines.append(f"<!-- test-gated-updates:state={version_str}|{kind_str} -->")
+    return lines
+
+
+def _render_transitive_issue_body(
+    target: IssueTarget, run_url: str, pr_url: str | None, last_seen: str
+) -> str:
+    """Body for the `update-transitive` step's own managed issue (issue
+    #24, `target.kind == "transitive"`) - lists the packages the failed
+    lock-wide refresh actually changed (name, old -> new, capped at
+    `_MAX_CHANGED_PACKAGES_IN_ISSUE`) before the usual captured-output
+    detail block, since there is no single package/version for a heading
+    table row the way a normal package issue has."""
+    kind_label = _REASON_LABELS.get(target.failure_kind, target.failure_kind or "failed")
+    lines = [
+        f"<!-- test-gated-updates:pkg={TRANSITIVE_ISSUE_PACKAGE} -->",
+        f"The `update-transitive` lock-wide refresh fails ({kind_label}).",
+        "",
+    ]
+    if target.changed_packages:
+        shown = target.changed_packages[:_MAX_CHANGED_PACKAGES_IN_ISSUE]
+        omitted = len(target.changed_packages) - len(shown)
+        lines.append("Packages the refresh changed before it was discarded:")
+        lines.append("")
+        lines.append("| package | old | new |")
+        lines.append("| --- | --- | --- |")
+        lines += [f"| {_cell(p.name)} | {_cell(p.old)} | {_cell(p.new)} |" for p in shown]
+        if omitted:
+            lines.append("")
+            lines.append(f"_… and {omitted} more changed package(s)._")
+        lines.append("")
+    lines.append(_detail_block("transitive dependencies", target.output_tail))
+    lines += _issue_footer_lines(target, run_url, pr_url, last_seen)
+    return "\n".join(lines) + "\n"
+
+
 def render_issue_body(target: IssueTarget, run_url: str, pr_url: str | None, last_seen: str) -> str:
     """The managed issue's body. Reuses `report.py`'s `_cell` (safe inline
     escaping) and `_detail_block` (fenced, `</details>`-safe captured
     output) so a package name/version/output tail can never break this
-    body's markdown, exactly as it cannot break the PR body/job summary."""
+    body's markdown, exactly as it cannot break the PR body/job summary.
+
+    `target.kind == "transitive"` (issue #24) branches to
+    `_render_transitive_issue_body` instead - see its own docstring and
+    `IssueTarget`'s for why."""
+    if target.kind == "transitive":
+        return _render_transitive_issue_body(target, run_url, pr_url, last_seen)
+
     kind_label = _REASON_LABELS.get(target.failure_kind, target.failure_kind or "failed")
     old_cell = _cell(target.old_version)
     attempted_cell = _cell(target.attempted_version)
-    version_str = target.attempted_version or ""
-    kind_str = target.failure_kind or ""
 
     if target.held_back:
         heading = (
@@ -381,14 +526,8 @@ def render_issue_body(target: IssueTarget, run_url: str, pr_url: str | None, las
         f"| {old_cell} | {attempted_cell} | {_cell(kind_label)} |",
         "",
         _detail_block(target.package, target.output_tail),
-        f"Workflow run: {run_url}",
     ]
-    if pr_url:
-        lines.append(f"Pull request: {pr_url}")
-    lines.append(f"Last seen: {last_seen}")
-    lines.append("")
-    lines.append(_MANAGED_BY_FOOTER)
-    lines.append(f"<!-- test-gated-updates:state={version_str}|{kind_str} -->")
+    lines += _issue_footer_lines(target, run_url, pr_url, last_seen)
     return "\n".join(lines) + "\n"
 
 
@@ -403,9 +542,15 @@ def _render_update_comment(target: IssueTarget, run_url: str, pr_url: str | None
     return "\n".join(lines)
 
 
-def _render_close_comment(run_url: str, pr_url: str | None) -> str:
+def _render_close_comment(run_url: str, pr_url: str | None, reason: str | None = None) -> str:
+    """`reason`, when given (see `IssueAction.close_reason`), replaces the
+    default "no longer failing" first line - used when that claim would
+    not actually be true (the package has no target this run because the
+    *feature that would have produced one* is itself disabled, not because
+    anything was checked and found passing - see `plan_issue_actions`'
+    `disabled_reasons`)."""
     lines = [
-        "No longer failing or held back as of this run - closing automatically.",
+        reason or "No longer failing or held back as of this run - closing automatically.",
         f"Workflow run: {run_url}",
     ]
     if pr_url:
@@ -571,7 +716,7 @@ def _execute_one_action(
     comment_body = (
         _render_duplicate_close_comment(action.duplicate_of)
         if action.duplicate_of is not None
-        else _render_close_comment(run_url, pr_url)
+        else _render_close_comment(run_url, pr_url, reason=action.close_reason)
     )
     close_result = gh_issues.close(action.issue, comment_body)
     if not close_result.ok:
@@ -653,6 +798,7 @@ def run_issue_management(
     run_url: str,
     pr_url: str | None,
     gh_issues: GithubIssues | None = None,
+    transitive: TransitiveOutcome | None = None,
 ) -> tuple[list[IssueAction], list[str]]:
     """Entry point called from `updater.__main__.run()`, after the PR has
     been created/edited (or, in dry-run, would have been) so `pr_url` is
@@ -661,6 +807,19 @@ def run_issue_management(
     at all for an aborted run (see the module docstring); this function
     does not know about `UpdateAborted` itself, keeping that decision, and
     the "why" behind it, in `run()`.
+
+    `transitive` (the `update-transitive` step's own result, issue #24) is
+    folded in via `transitive_issue_target()`: a failed step files/updates
+    `TRANSITIVE_ISSUE_PACKAGE`'s own managed issue, exactly like any other
+    failed package's - reusing the very same create/update/close machinery
+    below, just with a target built directly from a `TransitiveOutcome`
+    instead of a `PackageOutcome`. `transitive` is `None` whenever
+    `update-transitive` itself is disabled (the step never ran, so there is
+    nothing to report) - in that case, any *existing* open managed issue
+    for that marker package is still closed (see `plan_issue_actions`'
+    `disabled_reasons`), but with a close comment that says the feature is
+    disabled rather than the usual "no longer failing" claim, which would
+    not be true here - nothing was actually checked this run.
 
     A single action's `gh` failure is isolated by `execute_issue_actions`
     and comes back as an entry in the second, `errors` element of the
@@ -677,7 +836,22 @@ def run_issue_management(
     gh_issues = gh_issues or GithubIssues(runner, cfg.directory)
     labels = parse_labels(cfg.issue_labels)
     open_managed = gh_issues.list_open_managed()
-    actions = plan_issue_actions(outcomes, open_managed)
+
+    extra_target = transitive_issue_target(transitive)
+    extra_targets = {TRANSITIVE_ISSUE_PACKAGE: extra_target} if extra_target else None
+    disabled_reasons = None
+    if not cfg.update_transitive:
+        disabled_reasons = {
+            TRANSITIVE_ISSUE_PACKAGE: (
+                "update-transitive is disabled as of this run - closing automatically. "
+                "This does not mean the underlying refresh now succeeds, only that it is "
+                "no longer being checked."
+            )
+        }
+
+    actions = plan_issue_actions(
+        outcomes, open_managed, extra_targets=extra_targets, disabled_reasons=disabled_reasons
+    )
     return execute_issue_actions(
         gh_issues,
         actions,

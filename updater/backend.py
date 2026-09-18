@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from .config import parse_labels
 from .constraints import (
     all_clauses_parseable,
     pep508_has_upper_bound,
@@ -23,6 +24,7 @@ from .constraints import (
     poetry_classify_constraint,
 )
 from .errors import ActionError
+from .groups import MAIN_GROUP, poetry_group_args, uv_group_sync_args
 from .lockfile import all_locked_versions as _all_locked_versions
 from .lockfile import locked_version as _locked_version
 from .major import MajorAttempt
@@ -114,6 +116,17 @@ class Backend(Protocol):
         says, without changing the lock file itself."""
         ...
 
+    def update_transitive(self) -> CommandResult:
+        """Refresh every dependency (top-level and transitive) that is
+        still updatable within its declared constraint, in one final
+        tested step run after the top-level loop (`update-transitive`,
+        issue #24) - `poetry update --lock` / `uv lock --upgrade`,
+        followed by a `sync()` so the environment matches - never touches
+        `pyproject.toml`, only the lock file (verified against real
+        poetry==2.4.3 and uv==0.12.14 - see `PoetryBackend.update_transitive`/
+        `UvBackend.update_transitive`)."""
+        ...
+
     def locked_version(self, package: str) -> str | None:
         """The version(s) `package` is currently locked at, read straight
         from the lock file (not the installed environment), or None if the
@@ -131,10 +144,35 @@ class Backend(Protocol):
 class PoetryBackend:
     name = "poetry"
 
-    def __init__(self, runner: CommandRunner, directory: str, poetry_version: str):
+    def __init__(
+        self,
+        runner: CommandRunner,
+        directory: str,
+        poetry_version: str,
+        with_groups: list[str] | None = None,
+        without_groups: list[str] | None = None,
+        only_groups: list[str] | None = None,
+    ):
         self.runner = runner
         self.directory = directory
         self.poetry_version = poetry_version
+        self.with_groups = with_groups or []
+        self.without_groups = without_groups or []
+        self.only_groups = only_groups or []
+
+    def _group_args(self) -> list[str]:
+        """`--with`/`--without`/`--only` flags derived from `with-groups`/
+        `without-groups`/`only-groups` (issue #4) - `[]` (Poetry's own,
+        unchanged default) when none of them are set. Shared by every
+        command whose scope those inputs are documented to control:
+        `list_top_level_packages()`, `install()`, `sync()`, and the
+        transitive-dependencies step's own `poetry update` - deliberately
+        *not* `update_package()`/`update_all()`/`try_major()`, which target
+        one already-known package name directly and need no group
+        filtering of their own (verified against real poetry==2.4.3:
+        `poetry update <pkg>` resolves a named package regardless of which
+        group it belongs to)."""
+        return poetry_group_args(self.with_groups, self.without_groups, self.only_groups)
 
     def lock_file_path(self) -> Path:
         return Path(self.directory) / POETRY_LOCK_FILE
@@ -167,7 +205,19 @@ class PoetryBackend:
 
         before_version = self.locked_version(package)
 
-        args = ["poetry", "add", plan.requirement, "-n", *plan.extra_args]
+        # --lock: review fix, verified against real poetry==2.4.3 - a
+        # plain `poetry add` (no --lock) implicitly installs afterward
+        # using Poetry's own default group selection, which would
+        # silently reinstall a package `install()`'s own group-aware sync
+        # had correctly left out (the exact bug `update_package()` above
+        # has its own, longer comment about - found by an e2e test
+        # actually invoking the synced venv's own interpreter). The
+        # explicit `self.sync()` call below - which *does* respect
+        # `with-groups`/`without-groups`/`only-groups` - replaces it, only
+        # once the attempt is known to be worth keeping (a discarded
+        # attempt is reset+resynced by the caller instead, and --lock
+        # means nothing was ever installed for it to begin with).
+        args = ["poetry", "add", plan.requirement, "-n", "--lock", *plan.extra_args]
         result = self.runner.run(args, cwd=self.directory)
 
         if not result.ok:
@@ -187,13 +237,27 @@ class PoetryBackend:
                 discarded_reason="attempted version is a pre-release",
             )
 
-        return MajorAttempt(resolve_result=result)
+        sync_result = self.sync()
+        combined = CommandResult(
+            result.args + sync_result.args,
+            sync_result.returncode,
+            result.stdout + "\n" + sync_result.stdout,
+            result.stderr + "\n" + sync_result.stderr,
+        )
+        # A failing sync here (unlikely, but see UvBackend.try_major's own
+        # identical pattern) surfaces as an ordinary resolution failure -
+        # combined.ok being False is exactly what a real resolve failure
+        # looks like to every caller of try_major(), so no separate
+        # discarded_reason branch is needed for it.
+        return MajorAttempt(resolve_result=combined)
 
     def install(self) -> CommandResult:
-        return self.runner.run(["poetry", "install"], cwd=self.directory)
+        return self.runner.run(["poetry", "install", *self._group_args()], cwd=self.directory)
 
     def list_top_level_packages(self) -> list[str]:
-        result = self.runner.run(["poetry", "show", "--top-level"], cwd=self.directory)
+        result = self.runner.run(
+            ["poetry", "show", "--top-level", *self._group_args()], cwd=self.directory
+        )
         if not result.ok:
             raise ActionError(f"poetry show --top-level failed: {result.stderr}")
         packages = []
@@ -205,8 +269,21 @@ class PoetryBackend:
         return packages
 
     def update_package(self, package: str) -> CommandResult:
+        # `_group_args()` here (unlike try_major()'s own `poetry add`,
+        # which never needs it): `poetry update <pkg>` still resolves and
+        # updates the named package regardless of which group it belongs
+        # to (see `_group_args()`'s own docstring), but - review fix,
+        # verified against real poetry==2.4.3 - it *also* implicitly syncs
+        # the environment afterward using Poetry's own default group
+        # selection unless told otherwise, which would silently reinstall
+        # a package `install()`'s own group-aware sync had correctly left
+        # out (found by an e2e test actually invoking the synced venv's
+        # own interpreter after a per-package update, not just checking
+        # report-json). Passing the same flags here keeps that implicit
+        # sync in line with everything else.
         return self.runner.run(
-            ["poetry", "update", package, "--no-interaction"], cwd=self.directory
+            ["poetry", "update", package, "--no-interaction", *self._group_args()],
+            cwd=self.directory,
         )
 
     def update_all(self, packages: list[str]) -> CommandResult:
@@ -218,17 +295,46 @@ class PoetryBackend:
         # outright ("The following packages are not dependencies of this
         # project"), but `update_all` is only ever called with names this
         # backend's own `list_top_level_packages()` just returned, so that
-        # never happens here.
+        # never happens here. `_group_args()` guards its own implicit sync
+        # the same way `update_package()` does - see its comment above.
         return self.runner.run(
-            ["poetry", "update", *packages, "--no-interaction"], cwd=self.directory
+            ["poetry", "update", *packages, "--no-interaction", *self._group_args()],
+            cwd=self.directory,
         )
 
     def sync(self) -> CommandResult:
         """Poetry >= 2 uses the dedicated `sync` command; 1.x needs
         `install --sync`."""
         if version_at_least(self.poetry_version, "2"):
-            return self.runner.run(["poetry", "sync"], cwd=self.directory)
-        return self.runner.run(["poetry", "install", "--sync"], cwd=self.directory)
+            return self.runner.run(["poetry", "sync", *self._group_args()], cwd=self.directory)
+        return self.runner.run(
+            ["poetry", "install", "--sync", *self._group_args()], cwd=self.directory
+        )
+
+    def update_transitive(self) -> CommandResult:
+        # `--lock`: only refresh the lock file, never install/sync as a
+        # side effect (verified against real poetry==2.4.3: plain `poetry
+        # update` without `--lock` installs into the environment too,
+        # using its own default group selection rather than this backend's
+        # `with-groups`/`without-groups`/`only-groups`-derived one) - the
+        # sync() call below does that instead, so it goes through the same
+        # group selection as every other install/sync. Deliberately no
+        # `_group_args()` here (see its own docstring) - this refreshes
+        # the whole lock file within its existing constraints, same as a
+        # plain `poetry update` would, regardless of which groups are
+        # selected for listing/installing.
+        update_result = self.runner.run(
+            ["poetry", "update", "--lock", "--no-interaction"], cwd=self.directory
+        )
+        if not update_result.ok:
+            return update_result
+        sync_result = self.sync()
+        return CommandResult(
+            update_result.args + sync_result.args,
+            sync_result.returncode,
+            update_result.stdout + "\n" + sync_result.stdout,
+            update_result.stderr + "\n" + sync_result.stderr,
+        )
 
     def locked_version(self, package: str) -> str | None:
         return _locked_version(self.lock_file_path(), package)
@@ -386,15 +492,23 @@ class UvBackend:
         directory: str,
         python_version: str,
         uv_sync_args: str = "",
+        with_groups: list[str] | None = None,
+        without_groups: list[str] | None = None,
+        only_groups: list[str] | None = None,
     ):
         self.runner = runner
         self.directory = directory
         self.python_version = python_version
         self.uv_sync_args = uv_sync_args
+        self.with_groups = with_groups or []
+        self.without_groups = without_groups or []
+        self.only_groups = only_groups or []
         # sync() (and therefore _selection_args()) runs once per package in
-        # the update loop; without this, a project with tool.uv.conflicts
-        # would print the same ::warning:: dozens of times over one run.
+        # the update loop; without these, a project with tool.uv.conflicts,
+        # or a `without-groups` selection that includes "main", would print
+        # the same ::warning:: dozens of times over one run.
         self._conflicts_warned = False
+        self._without_main_warned = False
 
     def lock_file_path(self) -> Path:
         return Path(self.directory) / UV_LOCK_FILE
@@ -511,36 +625,68 @@ class UvBackend:
 
         `uv-sync-args`, when given, always wins and replaces the default
         selection outright (parsed as shell arguments, e.g. `--extra cpu
-        --group dev`). Otherwise the default is `--all-groups
-        --all-extras` - unless the project declares `[tool.uv.conflicts]`,
-        in which case `--all-groups --all-extras` would unconditionally
-        select mutually exclusive extras/groups and uv would simply refuse
-        to sync ("Extras `cpu` and `gpu` are incompatible with the
-        declared conflicts"). There is no generically correct subset to
-        pick automatically, so this falls back to no selection flags at
-        all (uv's own default: the project's default dependency groups,
-        no optional extras) and warns that `uv-sync-args` is how to select
-        what actually gets installed.
+        --group dev`) - `with-groups`/`without-groups`/`only-groups` then
+        only ever filter which top-level packages get *iterated*
+        (`list_top_level_packages()`), never what gets synced (documented
+        in the README).
+
+        Otherwise, with none of `with-groups`/`without-groups`/`only-groups`
+        set either, the default is `--all-groups --all-extras` (unchanged
+        from before issue #4) - unless the project declares
+        `[tool.uv.conflicts]`, in which case `--all-groups --all-extras`
+        would unconditionally select mutually exclusive extras/groups and
+        uv would simply refuse to sync ("Extras `cpu` and `gpu` are
+        incompatible with the declared conflicts"). There is no
+        generically correct subset to pick automatically, so this falls
+        back to no selection flags at all (uv's own default: the
+        project's default dependency groups, no optional extras) and warns
+        that `uv-sync-args` is how to select what actually gets installed.
+
+        With one of `with-groups`/`without-groups`/`only-groups` set, the
+        group portion of the selection switches to `uv_group_sync_args()`
+        (see its own docstring: uv's own native default group set,
+        adjusted by those inputs) instead of `--all-groups` - the extras
+        portion (`--all-extras`, or nothing under `tool.uv.conflicts`) is
+        unaffected either way, since extras are a separate axis this
+        feature does not touch.
         """
         if self.uv_sync_args:
             return shlex.split(self.uv_sync_args)
 
         pyproject_path = self._pyproject_path()
-        if pyproject_path.is_file() and has_uv_conflicts(pyproject_path):
-            if not self._conflicts_warned:
-                print(
-                    "::warning::tool.uv.conflicts detected in "
-                    f"{pyproject_path}: some extras/groups are declared "
-                    "mutually exclusive, so `uv sync --all-groups "
-                    "--all-extras` would fail. Falling back to `uv sync` with "
-                    "no extras and only the default dependency groups. Set "
-                    "the uv-sync-args input to select what to install, e.g. "
-                    "'--extra cpu --group dev'."
-                )
-                self._conflicts_warned = True
-            return []
+        conflicts = pyproject_path.is_file() and has_uv_conflicts(pyproject_path)
+        if conflicts and not self._conflicts_warned:
+            print(
+                "::warning::tool.uv.conflicts detected in "
+                f"{pyproject_path}: some extras/groups are declared "
+                "mutually exclusive, so `uv sync --all-extras` would fail. "
+                "Falling back to `uv sync` with no extras selected (group "
+                "selection unaffected). Set the uv-sync-args input to "
+                "select what to install, e.g. '--extra cpu --group dev'."
+            )
+            self._conflicts_warned = True
+        extras_args = [] if conflicts else ["--all-extras"]
 
-        return ["--all-groups", "--all-extras"]
+        group_args = uv_group_sync_args(self.with_groups, self.without_groups, self.only_groups)
+        if group_args is None:
+            if conflicts:
+                # Matches the pre-issue-#4 conflict fallback exactly: no
+                # selection flags at all (uv's own default group set, no
+                # extras), not just no extras.
+                return []
+            group_args = ["--all-groups"]
+        elif MAIN_GROUP in self.without_groups and not self._without_main_warned:
+            print(
+                "::warning::without-groups includes 'main', but uv has no "
+                "flag to exclude the project's own [project.dependencies] "
+                "from `uv sync` while still installing other groups - main "
+                "is still installed. This only affects `uv sync`; the "
+                "top-level packages iterated by this run correctly exclude "
+                "'main' either way."
+            )
+            self._without_main_warned = True
+
+        return group_args + extras_args
 
     def _sync_args(self) -> list[str]:
         return [
@@ -562,7 +708,12 @@ class UvBackend:
         pyproject_path = self._pyproject_path()
         if not pyproject_path.is_file():
             raise ActionError(f"{pyproject_path} not found; nothing to update")
-        return list_top_level_dependency_names(pyproject_path)
+        return list_top_level_dependency_names(
+            pyproject_path,
+            with_groups=self.with_groups,
+            without_groups=self.without_groups,
+            only_groups=self.only_groups,
+        )
 
     def update_package(self, package: str) -> CommandResult:
         lock_result = self.runner.run(
@@ -597,6 +748,21 @@ class UvBackend:
     def sync(self) -> CommandResult:
         return self.runner.run(self._sync_args(), cwd=self.directory)
 
+    def update_transitive(self) -> CommandResult:
+        # Deliberately no --upgrade-package/--upgrade-group restriction and
+        # no group-selection args here (see PoetryBackend.update_transitive's
+        # comment - the same reasoning applies): this refreshes the whole
+        # lock file within its existing constraints, same scope as a plain
+        # `uv lock --upgrade` would cover. sync() below is what applies
+        # with-groups/without-groups/only-groups, same as every other
+        # install/sync.
+        lock_result = self.runner.run(
+            ["uv", "lock", "--upgrade", "--python", self.python_version], cwd=self.directory
+        )
+        if not lock_result.ok:
+            return lock_result
+        return self.sync()
+
     def locked_version(self, package: str) -> str | None:
         return _locked_version(self.lock_file_path(), package)
 
@@ -605,8 +771,26 @@ class UvBackend:
 
 
 def make_backend(package_manager: str, runner: CommandRunner, cfg: Config) -> Backend:
+    with_groups = parse_labels(cfg.with_groups)
+    without_groups = parse_labels(cfg.without_groups)
+    only_groups = parse_labels(cfg.only_groups)
     if package_manager == "poetry":
-        return PoetryBackend(runner, cfg.directory, cfg.poetry_version)
+        return PoetryBackend(
+            runner,
+            cfg.directory,
+            cfg.poetry_version,
+            with_groups=with_groups,
+            without_groups=without_groups,
+            only_groups=only_groups,
+        )
     if package_manager == "uv":
-        return UvBackend(runner, cfg.directory, cfg.python_version, cfg.uv_sync_args)
+        return UvBackend(
+            runner,
+            cfg.directory,
+            cfg.python_version,
+            cfg.uv_sync_args,
+            with_groups=with_groups,
+            without_groups=without_groups,
+            only_groups=only_groups,
+        )
     raise ActionError(f"unknown package manager '{package_manager}'")

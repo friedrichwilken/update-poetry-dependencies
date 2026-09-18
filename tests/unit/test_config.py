@@ -104,3 +104,31 @@ def test_check_strategy_accepts_batch_first():
 def test_check_strategy_rejects_unknown_value():
     with pytest.raises(ActionError):
         check_strategy("bogus")
+
+
+def test_config_from_env_reads_transitive_and_group_inputs():
+    from updater.config import Config
+
+    env = {
+        "UPDATE_TRANSITIVE": "true",
+        "WITH_GROUPS": "docs",
+        "WITHOUT_GROUPS": "dev",
+        "ONLY_GROUPS": "",
+    }
+    cfg = Config.from_env(env)
+
+    assert cfg.update_transitive is True
+    assert cfg.with_groups == "docs"
+    assert cfg.without_groups == "dev"
+    assert cfg.only_groups == ""
+
+
+def test_config_from_env_defaults_transitive_and_groups_off():
+    from updater.config import Config
+
+    cfg = Config.from_env({})
+
+    assert cfg.update_transitive is False
+    assert cfg.with_groups == ""
+    assert cfg.without_groups == ""
+    assert cfg.only_groups == ""

@@ -28,7 +28,19 @@ block:
   run with `strategy: 'batch-first'`): both idna and six update cleanly,
   so the batch's one test run passes outright - every record is
   `updated` with `strategy: "batch-first"` and `tested_in_batch: true`,
-  and `batch_test_failed` is absent (the batch never failed here).
+  and `batch_test_failed` is absent (the batch never failed here). These
+  two matrix entries also run with `update-transitive: 'true'` (issue
+  #24): both fixtures' packages are leaf packages with no dependencies of
+  their own, and the fixtures' "dev" group member (typing-extensions) is
+  exactly pinned, so the transitive step deterministically has nothing
+  left to do - `transitive-report` (the `TRANSITIVE_REPORT` env var,
+  checked separately from `REPORT_JSON`/`by_name`) must be `{"status":
+  "unchanged", "changed_packages": []}`.
+- "groups" (`tests/fixture/poetry-batch`/`tests/fixture/uv-batch` again,
+  run with `without-groups: 'dev'`, issue #4): the fixtures' "dev" group
+  member (typing-extensions) must never appear in `report-json` at all -
+  only idna/six ("main"), both updated cleanly, same as "batch-happy"
+  minus the batch-first-specific fields.
 """
 
 from __future__ import annotations
@@ -163,12 +175,49 @@ def check_batch_happy(by_name: dict, check) -> None:
         )
 
 
+def check_groups(by_name: dict, check) -> None:
+    check("idna" in by_name, "expected an idna record")
+    check("six" in by_name, "expected a six record")
+    check(
+        "typing-extensions" not in by_name,
+        "typing-extensions must be excluded entirely by without-groups: dev, "
+        f"got a record for it: {by_name.get('typing-extensions')!r}",
+    )
+
+    for name in ("idna", "six"):
+        record = by_name.get(name, {})
+        check(record.get("status") == "updated", f"{name} status: {record.get('status')!r}")
+        check(
+            record.get("old_version") != record.get("new_version"),
+            f"{name} old_version == new_version: {record.get('old_version')!r}",
+        )
+
+
 SCENARIOS = {
     "basic": check_basic,
     "major": check_major,
     "batch-fallback": check_batch_fallback,
     "batch-happy": check_batch_happy,
+    "groups": check_groups,
 }
+
+# update-transitive (issue #24) is only ever turned on for the
+# "batch-happy" matrix entries (see check_action.yml) - deterministically
+# "unchanged" there (see check_batch_happy's own note above). Every other
+# scenario leaves update-transitive at its default off, so transitive-report
+# must be the JSON literal null for them.
+EXPECTED_TRANSITIVE_REPORT = {
+    "batch-happy": {"status": "unchanged", "changed_packages": []},
+}
+
+
+def check_transitive_report(scenario: str, check) -> None:
+    transitive = json.loads(os.environ.get("TRANSITIVE_REPORT", "null"))
+    expected = EXPECTED_TRANSITIVE_REPORT.get(scenario)
+    check(
+        transitive == expected,
+        f"transitive-report for scenario {scenario!r}: expected {expected!r}, got {transitive!r}",
+    )
 
 
 def main() -> int:
@@ -185,6 +234,7 @@ def main() -> int:
             status = 1
 
     SCENARIOS[scenario](by_name, check)
+    check_transitive_report(scenario, check)
 
     return status
 

@@ -306,6 +306,9 @@ def test_make_backend_returns_poetry_backend():
         poetry_version = "2.1.3"
         python_version = "3.12.7"
         uv_sync_args = ""
+        with_groups = ""
+        without_groups = ""
+        only_groups = ""
 
     backend = make_backend("poetry", FakeCommandRunner(), Cfg())
     assert isinstance(backend, PoetryBackend)
@@ -317,6 +320,9 @@ def test_make_backend_returns_uv_backend():
         poetry_version = "2.1.3"
         python_version = "3.12.7"
         uv_sync_args = ""
+        with_groups = ""
+        without_groups = ""
+        only_groups = ""
 
     backend = make_backend("uv", FakeCommandRunner(), Cfg())
     assert isinstance(backend, UvBackend)
@@ -356,6 +362,9 @@ def test_make_backend_raises_for_unknown_manager():
         poetry_version = "2.1.3"
         python_version = "3.12.7"
         uv_sync_args = ""
+        with_groups = ""
+        without_groups = ""
+        only_groups = ""
 
     with pytest.raises(ActionError):
         make_backend("pipenv", FakeCommandRunner(), Cfg())
@@ -456,8 +465,45 @@ def test_poetry_try_major_uses_group_flag_for_group_dependency(tmp_path):
 
     assert attempt.skip_reason is None
     assert attempt.resolve_result.ok
-    assert runner.calls[0]["args"] == ["poetry", "add", "six@latest", "-n", "--group", "dev"]
+    assert runner.calls[0]["args"] == [
+        "poetry",
+        "add",
+        "six@latest",
+        "-n",
+        "--lock",
+        "--group",
+        "dev",
+    ]
     assert backend.locked_version("six") == "2.0.0"
+
+
+def test_poetry_try_major_syncs_after_a_successful_attempt_respecting_group_flags(tmp_path):
+    """Review fix: `poetry add ... --lock` only refreshes the manifest/lock
+    (verified against real poetry==2.4.3 - unlike a plain `poetry add`,
+    which implicitly installs using Poetry's own default group selection);
+    a successful, kept attempt must still sync the environment itself
+    (the caller tests against it next, with no sync of its own in
+    between) - and that sync must go through the same with-groups/
+    without-groups/only-groups selection as everything else."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[tool.poetry.group.dev.dependencies]\nsix = "^1.15.0"\n')
+    lock = tmp_path / "poetry.lock"
+    lock.write_text('[[package]]\nname = "six"\nversion = "1.15.0"\n')
+    runner = _RewritingRunner(
+        pyproject,
+        lock,
+        after_pyproject='[tool.poetry.group.dev.dependencies]\nsix = "^2.0.0"\n',
+        after_lock='[[package]]\nname = "six"\nversion = "2.0.0"\n',
+    )
+    backend = PoetryBackend(runner, str(tmp_path), "2.4.3", without_groups=["docs"])
+
+    attempt = backend.try_major("six")
+
+    assert attempt.skip_reason is None
+    assert attempt.discarded_reason is None
+    assert attempt.resolve_result.ok
+    assert len(runner.calls) == 2
+    assert runner.calls[1]["args"] == ["poetry", "sync", "--without", "docs"]
 
 
 def test_poetry_try_major_preserves_extras_in_requirement_string(tmp_path):
@@ -508,6 +554,10 @@ def test_poetry_try_major_discards_when_more_than_version_changed(tmp_path):
     assert attempt.skip_reason is None
     assert attempt.resolve_result.ok
     assert attempt.discarded_reason == "manifest changed beyond the version constraint"
+    # A discarded attempt is reset+resynced by the caller instead (and
+    # --lock means nothing was ever installed for it in the first place)
+    # - try_major itself must not have called sync() here.
+    assert len(runner.calls) == 1
 
 
 def test_poetry_try_major_resolution_failure_is_reported(tmp_path):
@@ -558,6 +608,7 @@ def test_poetry_try_major_pep621_optional_dependency_uses_optional_flag(tmp_path
         "add",
         "requests@latest",
         "-n",
+        "--lock",
         "--optional",
         "http",
     ]
@@ -756,6 +807,7 @@ def test_poetry_try_major_passes_optional_flag_for_legacy_optional_dependency(tm
         "add",
         "requests[socks]@latest",
         "-n",
+        "--lock",
         "--optional",
         "http",
     ]
@@ -853,3 +905,274 @@ def test_uv_try_major_discards_a_prerelease_attempt(tmp_path):
     assert attempt.skip_reason is None
     assert attempt.resolve_result.ok
     assert attempt.discarded_reason == "attempted version is a pre-release"
+
+
+# --- with-groups/without-groups/only-groups threading (issue #4) -------------
+
+
+def test_poetry_backend_list_top_level_packages_passes_group_flags():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(
+        runner, "some/dir", "2.4.3", with_groups=["docs"], without_groups=["dev"]
+    )
+
+    backend.list_top_level_packages()
+
+    assert runner.calls[0]["args"] == [
+        "poetry",
+        "show",
+        "--top-level",
+        "--with",
+        "docs",
+        "--without",
+        "dev",
+    ]
+
+
+def test_poetry_backend_list_top_level_packages_no_flags_by_default():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
+
+    backend.list_top_level_packages()
+
+    assert runner.calls[0]["args"] == ["poetry", "show", "--top-level"]
+
+
+def test_poetry_backend_install_passes_only_groups_flag():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3", only_groups=["dev"])
+
+    backend.install()
+
+    assert runner.calls[0]["args"] == ["poetry", "install", "--only", "dev"]
+
+
+def test_poetry_backend_sync_passes_group_flags():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3", without_groups=["dev"])
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == ["poetry", "sync", "--without", "dev"]
+
+
+def test_poetry_backend_update_package_and_update_all_no_group_flags_by_default():
+    """Byte-compat: with none of with-groups/without-groups/only-groups
+    set, the exact command is unchanged from before issue #4."""
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
+
+    backend.update_package("idna")
+    backend.update_all(["idna", "six"])
+
+    assert runner.calls[0]["args"] == ["poetry", "update", "idna", "--no-interaction"]
+    assert runner.calls[1]["args"] == ["poetry", "update", "idna", "six", "--no-interaction"]
+
+
+def test_poetry_backend_update_package_and_update_all_apply_group_flags():
+    """Review fix: `poetry update <pkg>` still resolves/updates the named
+    package regardless of which group it belongs to (a package is not
+    excluded from being *updated* just because its group is not
+    selected), but it also implicitly re-syncs the environment afterward
+    - verified against real poetry==2.4.3 - so that implicit sync must
+    still respect with-groups/without-groups/only-groups, or a package
+    `install()`'s own group-aware sync correctly left out gets silently
+    reinstalled by the very next per-package update."""
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3", without_groups=["dev"])
+
+    backend.update_package("idna")
+    backend.update_all(["idna", "six"])
+
+    assert runner.calls[0]["args"] == [
+        "poetry",
+        "update",
+        "idna",
+        "--no-interaction",
+        "--without",
+        "dev",
+    ]
+    assert runner.calls[1]["args"] == [
+        "poetry",
+        "update",
+        "idna",
+        "six",
+        "--no-interaction",
+        "--without",
+        "dev",
+    ]
+
+
+def test_uv_backend_list_top_level_packages_applies_without_groups(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = ["six"]
+
+        [dependency-groups]
+        dev = ["idna"]
+        """
+    )
+    backend = UvBackend(FakeCommandRunner(), str(tmp_path), "3.12", without_groups=["dev"])
+
+    assert backend.list_top_level_packages() == ["six"]
+
+
+def test_uv_backend_sync_switches_to_native_default_when_a_group_input_is_set():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12", with_groups=["docs"])
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--group",
+        "docs",
+        "--all-extras",
+        "--python",
+        "3.12",
+    ]
+
+
+def test_uv_backend_sync_only_groups_maps_to_only_group_flags():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12", only_groups=["dev", "docs"])
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--only-group",
+        "dev",
+        "--only-group",
+        "docs",
+        "--all-extras",
+        "--python",
+        "3.12",
+    ]
+
+
+def test_uv_backend_sync_without_main_warns_but_still_installs_main(capsys):
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12", without_groups=["main"])
+
+    backend.sync()
+
+    assert "--no-group" not in runner.calls[0]["args"]
+    out = capsys.readouterr().out
+    assert "::warning::" in out
+    assert "without-groups" in out
+
+
+def test_uv_backend_sync_uv_sync_args_wins_even_with_group_inputs_set():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12", uv_sync_args="--extra cpu", only_groups=["dev"])
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--extra",
+        "cpu",
+        "--python",
+        "3.12",
+    ]
+
+
+def test_uv_backend_sync_default_unaffected_when_no_group_input_is_set():
+    """Byte-compat: with none of with-groups/without-groups/only-groups
+    set, sync's selection is exactly what it was before issue #4."""
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    backend.sync()
+
+    assert runner.calls[0]["args"] == [
+        "uv",
+        "sync",
+        "--locked",
+        "--all-groups",
+        "--all-extras",
+        "--python",
+        "3.12",
+    ]
+
+
+def test_make_backend_threads_group_inputs_through_to_the_backend():
+    class Cfg:
+        directory = "."
+        poetry_version = "2.1.3"
+        python_version = "3.12.7"
+        uv_sync_args = ""
+        with_groups = "docs"
+        without_groups = "dev"
+        only_groups = ""
+
+    backend = make_backend("poetry", FakeCommandRunner(), Cfg())
+    assert backend.with_groups == ["docs"]
+    assert backend.without_groups == ["dev"]
+
+
+# --- update_transitive (update-transitive, issue #24) -------------------------
+
+
+def test_poetry_backend_update_transitive_locks_only_then_syncs():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
+
+    backend.update_transitive()
+
+    assert runner.calls[0]["args"] == ["poetry", "update", "--lock", "--no-interaction"]
+    assert runner.calls[1]["args"][:2] == ["poetry", "sync"]
+
+
+def test_poetry_backend_update_transitive_does_not_sync_when_lock_fails():
+    runner = FakeCommandRunner(results=[result(False, stderr="boom")])
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
+
+    update_result = backend.update_transitive()
+
+    assert not update_result.ok
+    assert len(runner.calls) == 1
+
+
+def test_poetry_backend_update_transitive_ignores_group_flags():
+    """Deliberately refreshes the whole lock within its existing
+    constraints, same scope as a plain `poetry update` - see the
+    backend's own docstring."""
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3", only_groups=["dev"])
+
+    backend.update_transitive()
+
+    assert runner.calls[0]["args"] == ["poetry", "update", "--lock", "--no-interaction"]
+
+
+def test_uv_backend_update_transitive_upgrades_then_syncs():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    backend.update_transitive()
+
+    assert runner.calls[0] == {
+        "args": ["uv", "lock", "--upgrade", "--python", "3.12"],
+        "cwd": "some/dir",
+    }
+    assert runner.calls[1]["args"][:2] == ["uv", "sync"]
+
+
+def test_uv_backend_update_transitive_does_not_sync_when_lock_fails():
+    runner = FakeCommandRunner(results=[result(False, stderr="boom")])
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    update_result = backend.update_transitive()
+
+    assert not update_result.ok
+    assert len(runner.calls) == 1

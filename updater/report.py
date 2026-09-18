@@ -18,7 +18,7 @@ import json
 import re
 import secrets
 
-from .updater import PackageOutcome, UpdateResult
+from .updater import PackageOutcome, TransitiveOutcome, UpdateResult
 
 # Comfortably below GitHub's 65536 character PR body limit.
 MAX_BODY_CHARS = 60000
@@ -285,6 +285,38 @@ def _budgeted_details(
     return text
 
 
+def _transitive_section(transitive: TransitiveOutcome, budget: int) -> str:
+    """`## 🔁 Transitive dependencies` section (`update-transitive`, issue
+    #24) - only ever rendered when the step actually ran this run (see
+    `render_body`: `result.transitive` is `None` otherwise), so a run that
+    leaves the feature at its default `false` renders byte-identically to
+    before it existed. Reuses `_table_section`'s own budgeting for the
+    changed-packages table, exactly like `_updated_table`."""
+    heading = "## \U0001f501 Transitive dependencies"
+    if transitive.status == "unchanged":
+        return f"{heading}\n\nNo transitive updates available.\n"
+
+    intro = (
+        "Updated (see the `Update transitive dependencies` commit):"
+        if transitive.status == "updated"
+        else "⚠️ Failed and discarded - see the output below."
+    )
+    if not transitive.changed_packages:
+        return f"{heading}\n\n{intro}\n"
+
+    rows = [
+        f"| {_cell(p.name)} | {_cell(p.old)} | {_cell(p.new)} |"
+        for p in transitive.changed_packages
+    ]
+    return _table_section(
+        f"{heading}\n\n{intro}",
+        ["| package | old | new |", "| --- | --- | --- |"],
+        rows,
+        budget,
+        "changed package(s)",
+    )
+
+
 def _hard_truncate(body: str, max_chars: int) -> str:
     """Unconditional final guard: whatever the section-level budgeting
     above produced, `len(result) <= max_chars` always holds afterwards -
@@ -337,6 +369,18 @@ def render_body(
 
     if not updated and not failed and not skipped:
         body = f"{header}\n\nNo packages were updated - nothing changed in this run.\n"
+        if result.transitive is not None:
+            remaining = max(max_chars - len(body) - 2, 0)
+            body += "\n" + _transitive_section(result.transitive, remaining)
+            if result.transitive.status == "failed" and result.transitive.output_tail:
+                budget = max_chars - len(body)
+                details = _budgeted_details(
+                    [("transitive dependencies", result.transitive.output_tail)],
+                    budget,
+                    "failed step(s)",
+                )
+                if details:
+                    body += "\n" + details
         return _hard_truncate(body, max_chars)
 
     remaining = max(max_chars - len(header) - 2, 0)
@@ -362,6 +406,10 @@ def render_body(
         section = _beyond_constraint_skip_reasons_line(beyond_constraint_skipped, remaining)
         parts.append(section)
         remaining = max(remaining - len(section) - 2, 0)
+    if result.transitive is not None:
+        section = _transitive_section(result.transitive, remaining)
+        parts.append(section)
+        remaining = max(remaining - len(section) - 2, 0)
 
     body = "\n\n".join(parts) + "\n"
 
@@ -379,6 +427,20 @@ def render_body(
             [(o.name, o.beyond_constraint_output_tail) for o in held_back],
             budget,
             "held-back update(s)",
+        )
+        if details:
+            body += "\n" + details
+
+    if (
+        result.transitive is not None
+        and result.transitive.status == "failed"
+        and result.transitive.output_tail
+    ):
+        budget = max_chars - len(body)
+        details = _budgeted_details(
+            [("transitive dependencies", result.transitive.output_tail)],
+            budget,
+            "failed step(s)",
         )
         if details:
             body += "\n" + details
@@ -473,6 +535,30 @@ def report_json(result: UpdateResult, max_bytes: int = MAX_REPORT_JSON_BYTES) ->
     return text
 
 
+def transitive_report_json(transitive: TransitiveOutcome | None) -> str:
+    """The `transitive-report` output (`update-transitive`, issue #24) - a
+    single JSON object (never part of `report-json`'s per-package array -
+    see `TransitiveOutcome` for why it needs its own shape), or the JSON
+    literal `"null"` when the step has not produced a result at all this
+    run (the feature is off - the default - or an abort happened before
+    the top-level loop even got to it). This is what keeps a run that
+    never touches the feature's `transitive-report` output byte-identical
+    (`null`) to what every other output already was before it existed."""
+    if transitive is None:
+        return "null"
+    record: dict = {
+        "status": transitive.status,
+        "changed_packages": [
+            {"name": p.name, "old": p.old, "new": p.new} for p in transitive.changed_packages
+        ],
+    }
+    if transitive.failure_kind is not None:
+        record["failure_kind"] = transitive.failure_kind
+    if transitive.output_tail:
+        record["output_tail"] = transitive.output_tail
+    return json.dumps(record)
+
+
 def write_outputs(
     output_path: str,
     result: UpdateResult,
@@ -480,13 +566,21 @@ def write_outputs(
     summary_path: str = "",
     summary_body: str | None = None,
     issue_actions_json: str = "[]",
+    transitive_report: str | None = None,
 ) -> None:
     """`issue_actions_json` defaults to an empty JSON array so every
     existing call site (the early always-write guard in `run()`, the
     `UpdateAborted` path, and any test that does not care about
     `create-issues`) keeps writing a well-formed `issue-actions` output
     without having to know about the feature at all - only the one
-    successful, non-aborted path in `run()` ever passes a real value."""
+    successful, non-aborted path in `run()` ever passes a real value.
+    `transitive_report` similarly defaults to `None`, in which case it is
+    derived from `result.transitive` itself (`transitive_report_json`) -
+    every call site can simply pass `result` and get the right value
+    without needing to know about `update-transitive` either; explicit
+    values only exist for tests exercising `write_outputs` directly."""
+    if transitive_report is None:
+        transitive_report = transitive_report_json(result.transitive)
     if output_path:
         with open(output_path, "a", encoding="utf-8") as fh:
             fh.write(f"passed-packages={','.join(result.passed)}\n")
@@ -495,6 +589,7 @@ def write_outputs(
             fh.write(f"held-back-packages={','.join(result.held_back)}\n")
             fh.write(f"report-json={report_json(result)}\n")
             fh.write(f"issue-actions={issue_actions_json}\n")
+            fh.write(f"transitive-report={transitive_report}\n")
             delimiter = f"ghadelim_{secrets.token_hex(16)}"
             fh.write(f"pr-body<<{delimiter}\n{body}\n{delimiter}\n")
 

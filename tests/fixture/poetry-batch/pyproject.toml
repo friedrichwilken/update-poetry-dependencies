@@ -11,6 +11,14 @@ dependencies = [
 [tool.poetry]
 package-mode = false
 
+# One dev-group member, exactly pinned so it never has anything to update
+# (deterministic forever, regardless of new releases) - used by the "e2e
+# (poetry, groups)" job (without-groups: dev) to prove a group-excluded
+# top-level package is left out of report-json entirely, while idna/six
+# above are unaffected.
+[tool.poetry.group.dev.dependencies]
+typing-extensions = "4.12.2"
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

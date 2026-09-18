@@ -50,6 +50,18 @@ inputs:
   issue-labels:
     description: 'A comma or newline separated list of labels added to an issue created by create-issues. Labels must already exist in the repository.'
     default: ''
+  update-transitive:
+    description: "Opt-in: after the top-level loop (and any allow-major beyond-constraint attempts) finish, run one final tested step that refreshes every dependency - transitive included - still updatable within its existing constraints (`poetry update --lock` / `uv lock --upgrade`, then a sync), committed separately as 'Update transitive dependencies'. See the README 'update-transitive: refreshing transitive dependencies' section."
+    default: 'false'
+  with-groups:
+    description: "A comma or newline separated list of dependency groups to additionally include when selecting what gets installed/synced (Poetry: its own optional groups; uv: additional groups on top of its own default selection - see the README 'Dependency group selection' section for why this has no effect on which top-level packages are iterated). 'main' names the project's own ungrouped dependencies. May be combined with without-groups; mutually exclusive with only-groups."
+    default: ''
+  without-groups:
+    description: "A comma or newline separated list of dependency groups to exclude. 'main' names the project's own ungrouped dependencies ('dev' additionally covers uv's legacy tool.uv.dev-dependencies). May be combined with with-groups; mutually exclusive with only-groups. See the README 'Dependency group selection' section."
+    default: ''
+  only-groups:
+    description: "A comma or newline separated list of dependency groups to exclusively include, dropping every other group ('main' included). Mutually exclusive with with-groups/without-groups. See the README 'Dependency group selection' section."
+    default: ''
   github_token:
     description: 'GitHub token for the PR creation.'
     required: true
@@ -76,6 +88,9 @@ outputs:
   issue-actions:
     description: 'JSON array of planned/performed create-issues actions, one object per affected package: {package, action, issue}. action is "create", "update", or "close"; issue is the existing/created issue number, or null for a not-yet-created issue (always null in dry-run, since nothing is created). Empty array ([]) when create-issues is not enabled.'
     value: ${{ steps.update.outputs.issue-actions }}
+  transitive-report:
+    description: 'A single JSON object reporting the update-transitive step (or the JSON literal null when update-transitive is not enabled, or the step never ran because the run aborted first): {status, changed_packages, failure_kind, output_tail}. status is "updated", "failed", or "unchanged"; changed_packages is an array of {name, old, new} for every package the lock-wide refresh changed (present even on a failed/discarded attempt, to show what would have changed); failure_kind ("resolution" or "test") and output_tail are only present when status is "failed". See the README "update-transitive: refreshing transitive dependencies" section.'
+    value: ${{ steps.update.outputs.transitive-report }}
 
 runs:
   using: "composite"
@@ -102,6 +117,10 @@ runs:
         STRATEGY: ${{ inputs.strategy }}
         CREATE_ISSUES: ${{ inputs.create-issues }}
         ISSUE_LABELS: ${{ inputs.issue-labels }}
+        UPDATE_TRANSITIVE: ${{ inputs.update-transitive }}
+        WITH_GROUPS: ${{ inputs.with-groups }}
+        WITHOUT_GROUPS: ${{ inputs.without-groups }}
+        ONLY_GROUPS: ${{ inputs.only-groups }}
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
         # The updater itself always runs on a fixed, pinned interpreter

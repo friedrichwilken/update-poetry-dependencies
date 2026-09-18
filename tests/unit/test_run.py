@@ -328,8 +328,9 @@ def test_issue_actions_output_is_empty_when_feature_off(tmp_path):
 
 
 def test_report_outputs_are_byte_compatible_when_create_issues_is_off(tmp_path):
-    """The only change to the output file when the feature is off is the
-    new, additive `issue-actions=[]` line."""
+    """The only change to the output file when create-issues/update-transitive
+    are off is the new, additive `issue-actions=[]`/`transitive-report=null`
+    lines."""
     output_file_off = tmp_path / "off.txt"
     cfg = make_cfg(dry_run=True, create_issues=False, github_output=str(output_file_off))
     backend = FakeBackend(update_ok={"a": True})
@@ -350,7 +351,11 @@ def test_report_outputs_are_byte_compatible_when_create_issues_is_off(tmp_path):
         "held-back-packages",
         "report-json",
         "issue-actions",
+        "transitive-report",
     }
+
+    transitive_line = next(line for line in lines if line.startswith("transitive-report="))
+    assert transitive_line == "transitive-report=null"
 
 
 def test_create_issues_off_never_instantiates_or_calls_gh_issues(tmp_path):
@@ -532,3 +537,189 @@ def test_job_summary_does_not_mention_issue_actions_when_feature_off(tmp_path):
     run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
 
     assert "Issue actions:" not in summary_file.read_text()
+
+
+# --- update-transitive wiring (issue #24) ------------------------------------
+
+
+def test_update_transitive_disabled_by_default_never_calls_backend(tmp_path):
+    output_file = tmp_path / "out.txt"
+    cfg = make_cfg(dry_run=True, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert backend.update_transitive_calls == 0
+    assert "transitive-report=null" in output_file.read_text()
+
+
+def test_update_transitive_enabled_runs_after_the_top_level_loop_and_commits(tmp_path):
+    output_file = tmp_path / "out.txt"
+    cfg = make_cfg(dry_run=True, update_transitive=True, github_output=str(output_file))
+    backend = FakeBackend(
+        update_ok={"a": True},
+        lock_snapshots=[{"a": "1.0.0"}, {"a": "1.0.0", "b": "2.1.0"}],
+    )
+    git = FakeGit(diff_results=[True, True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert backend.update_transitive_calls == 1
+    assert git.commit_messages[-1] == "Update transitive dependencies"
+    content = output_file.read_text()
+    assert '"status": "updated"' in content
+    assert '"name": "b"' in content
+
+
+def test_update_transitive_failure_creates_a_managed_issue(tmp_path):
+    output_file = tmp_path / "out.txt"
+    cfg = make_cfg(
+        dry_run=False,
+        create_issues=True,
+        update_transitive=True,
+        github_output=str(output_file),
+    )
+    backend = FakeBackend(update_ok={}, update_transitive_ok=False, update_transitive_stderr="boom")
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert len(gh_issues.create_calls) == 1
+    assert (
+        gh_issues.create_calls[0]["title"]
+        == "transitive dependencies: lock-wide refresh fails (resolution)"
+    )
+    assert "boom" in gh_issues.create_calls[0]["body"]
+    content = output_file.read_text()
+    assert '"status": "failed"' in content
+
+
+def test_update_transitive_recovery_closes_the_managed_issue():
+    from updater.github_issues import ManagedIssue
+
+    cfg = make_cfg(dry_run=False, create_issues=True, update_transitive=True)
+    backend = FakeBackend(update_ok={})  # update_transitive_ok=True by default
+    git = FakeGit(diff_results=[False], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(
+        open_managed=[
+            ManagedIssue(
+                number=7, package="transitive-dependencies", last_version="", last_kind="test"
+            )
+        ]
+    )
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert len(gh_issues.close_calls) == 1
+    assert gh_issues.close_calls[0]["number"] == 7
+
+
+def test_update_transitive_never_files_an_issue_for_a_normal_package_failure():
+    """The synthetic transitive-dependencies package must never leak into
+    create-issues when the feature never ran (update-transitive off)."""
+    cfg = make_cfg(dry_run=False, create_issues=True, update_transitive=False)
+    backend = FakeBackend(update_ok={"a": False}, versions={"a": ["1.0.0", "1.0.0"]})
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    titles = [c["title"] for c in gh_issues.create_calls]
+    assert titles == ["a: update to 1.0.0 fails (resolution)"]
+    assert not any(t.startswith("transitive-dependencies") for t in titles)
+
+
+# --- with-groups/without-groups/only-groups fail-fast (issue #4) -------------
+
+
+def test_group_selection_mutual_exclusivity_fails_fast_before_any_work():
+    cfg = make_cfg(with_groups="docs", only_groups="dev")
+    backend = FakeBackend(update_ok={"a": True})
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=FakeGit(), gh=FakeGithubPR())
+
+    assert backend.install_calls == 0
+
+
+def test_unknown_group_name_fails_fast_before_any_work(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = []\n')
+    cfg = make_cfg(directory=str(tmp_path), only_groups="doesnotexist")
+    backend = FakeBackend(update_ok={"a": True})
+
+    with pytest.raises(ActionError, match="unknown dependency group"):
+        run(cfg, runner=FakeRunner(), backend=backend, git=FakeGit(), gh=FakeGithubPR())
+
+    assert backend.install_calls == 0
+
+
+def test_known_group_names_pass_validation_and_the_run_proceeds(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [tool.poetry.group.dev.dependencies]
+        idna = "*"
+        """
+    )
+    cfg = make_cfg(directory=str(tmp_path), dry_run=True, without_groups="dev")
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=FakeGithubPR())
+
+    assert backend.install_calls == 1
+
+
+def test_pep735_group_rejected_when_poetry_version_too_old(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """
+    )
+    cfg = make_cfg(directory=str(tmp_path), poetry_version="2.1.4", only_groups="test")
+    backend = FakeBackend(update_ok={"a": True})
+
+    with pytest.raises(ActionError, match="poetry-version >= 2.2"):
+        run(cfg, runner=FakeRunner(), backend=backend, git=FakeGit(), gh=FakeGithubPR())
+
+    assert backend.install_calls == 0
+
+
+def test_pep735_group_accepted_when_poetry_version_new_enough(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        test = ["pytest"]
+        """
+    )
+    cfg = make_cfg(
+        directory=str(tmp_path),
+        dry_run=True,
+        poetry_version="2.4.3",
+        only_groups="test",
+    )
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=FakeGithubPR())
+
+    assert backend.install_calls == 1
