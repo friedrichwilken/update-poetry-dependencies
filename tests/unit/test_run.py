@@ -3,6 +3,7 @@ import json
 import pytest
 from fakes import FakeBackend, FakeGit, FakeGithubIssues, FakeGithubPR, FakeRunner
 
+import updater.__main__ as main_module
 from updater.__main__ import run
 from updater.config import Config
 from updater.errors import ActionError
@@ -325,6 +326,77 @@ def test_pr_number_and_pr_url_outputs_empty_when_run_aborts_before_pr_step(tmp_p
 
     assert _output_value(output_file, "pr-number") == ""
     assert _output_value(output_file, "pr-url") == ""
+
+
+def _run_main_with_fakes(monkeypatch, cfg, backend, git, gh):
+    """Drives `main()` itself (not `run()` directly), with fakes swapped in
+    for every real collaborator `main()` would otherwise construct
+    (`CommandRunner`, `bootstrap`, `make_backend`, `GitRepo`, `GithubPR`),
+    so a test can assert on `main()`'s own exit code - not just that
+    `run()` raises - while still never touching a shell, filesystem or
+    network. `cfg.package_manager` must stay an explicit 'poetry'/'uv'
+    (never 'auto'): `detect_package_manager()` only touches the filesystem
+    in the 'auto' case, which none of these fakes exist to serve."""
+    monkeypatch.setattr(main_module, "CommandRunner", lambda: FakeRunner())
+    monkeypatch.setattr(main_module, "bootstrap", lambda *a, **kw: None)
+    monkeypatch.setattr(main_module, "make_backend", lambda *a, **kw: backend)
+    monkeypatch.setattr(main_module, "GitRepo", lambda runner, directory: git)
+    monkeypatch.setattr(main_module, "GithubPR", lambda runner, directory: gh)
+    monkeypatch.setattr(main_module.Config, "from_env", classmethod(lambda cls, env=None: cfg))
+    return main_module.main()
+
+
+def test_git_push_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(tmp_path, monkeypatch):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"], push_ok=False)
+    gh = FakeGithubPR(open_pr_number=None)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert git.push_branches == ["deps/test-gated-updates"]
+    assert gh.create_calls == []  # never reached - push failed first
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()  # outputs are still written
+
+
+def test_gh_pr_create_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(
+    tmp_path, monkeypatch
+):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None, create_ok=False)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert len(gh.create_calls) == 1
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()
+
+
+def test_gh_pr_edit_failure_leaves_pr_outputs_empty_and_exits_nonzero_via_main(
+    tmp_path, monkeypatch
+):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=7, edit_ok=False)
+
+    exit_code = _run_main_with_fakes(monkeypatch, cfg, backend, git, gh)
+
+    assert exit_code == 1
+    assert len(gh.edit_calls) == 1
+    assert _output_value(output_file, "pr-number") == ""
+    assert _output_value(output_file, "pr-url") == ""
+    assert "pr-body<<" in output_file.read_text()
 
 
 def test_job_summary_is_written_when_github_step_summary_is_set(tmp_path):
