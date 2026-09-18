@@ -8,9 +8,15 @@ from updater.report import (
     MAX_SUMMARY_CHARS,
     render_body,
     report_json,
+    transitive_report_json,
     write_outputs,
 )
-from updater.updater import PackageOutcome, UpdateResult
+from updater.updater import (
+    ChangedTransitivePackage,
+    PackageOutcome,
+    TransitiveOutcome,
+    UpdateResult,
+)
 
 
 def _outcome(**overrides) -> PackageOutcome:
@@ -920,3 +926,127 @@ def test_render_body_has_no_batch_fallback_banner_by_default():
     body = render_body(result, "https://example.com/run/1")
 
     assert "Batch update failed tests" not in body
+
+
+# --- transitive-report / "🔁 Transitive dependencies" section (issue #24) ----
+
+
+def test_transitive_report_json_is_null_when_no_transitive_result():
+    assert transitive_report_json(None) == "null"
+
+
+def test_transitive_report_json_unchanged():
+    record = json.loads(transitive_report_json(TransitiveOutcome(status="unchanged")))
+    assert record == {"status": "unchanged", "changed_packages": []}
+
+
+def test_transitive_report_json_updated_includes_changed_packages():
+    outcome = TransitiveOutcome(
+        status="updated",
+        changed_packages=[ChangedTransitivePackage(name="idna", old="3.3", new="3.4")],
+    )
+    record = json.loads(transitive_report_json(outcome))
+    assert record["status"] == "updated"
+    assert record["changed_packages"] == [{"name": "idna", "old": "3.3", "new": "3.4"}]
+    assert "failure_kind" not in record
+    assert "output_tail" not in record
+
+
+def test_transitive_report_json_failed_includes_failure_kind_and_output():
+    outcome = TransitiveOutcome(
+        status="failed", failure_kind="test", output_tail="assertion failed"
+    )
+    record = json.loads(transitive_report_json(outcome))
+    assert record["status"] == "failed"
+    assert record["failure_kind"] == "test"
+    assert record["output_tail"] == "assertion failed"
+
+
+def test_write_outputs_default_transitive_report_is_derived_from_result(tmp_path):
+    output_file = tmp_path / "out.txt"
+    result = UpdateResult(transitive=TransitiveOutcome(status="unchanged"))
+
+    write_outputs(str(output_file), result, "body")
+
+    content = output_file.read_text()
+    assert 'transitive-report={"status": "unchanged", "changed_packages": []}' in content
+
+
+def test_write_outputs_transitive_report_null_by_default(tmp_path):
+    output_file = tmp_path / "out.txt"
+
+    write_outputs(str(output_file), UpdateResult(), "body")
+
+    assert "transitive-report=null" in output_file.read_text()
+
+
+def test_render_body_transitive_section_absent_when_no_transitive_result():
+    body = render_body(UpdateResult(outcomes=[_outcome(name="a")]), "https://x/1")
+    assert "Transitive dependencies" not in body
+
+
+def test_render_body_transitive_section_unchanged():
+    result = UpdateResult(
+        outcomes=[_outcome(name="a")], transitive=TransitiveOutcome(status="unchanged")
+    )
+    body = render_body(result, "https://x/1")
+    assert "Transitive dependencies" in body
+    assert "No transitive updates available" in body
+
+
+def test_render_body_transitive_section_updated_lists_changed_packages():
+    result = UpdateResult(
+        outcomes=[_outcome(name="a")],
+        transitive=TransitiveOutcome(
+            status="updated",
+            changed_packages=[ChangedTransitivePackage(name="urllib3", old="2.0", new="2.1")],
+        ),
+    )
+    body = render_body(result, "https://x/1")
+    assert "Transitive dependencies" in body
+    assert "urllib3" in body
+    assert "2.0" in body and "2.1" in body
+
+
+def test_render_body_transitive_section_failed_shows_output_details():
+    result = UpdateResult(
+        outcomes=[_outcome(name="a")],
+        transitive=TransitiveOutcome(
+            status="failed", failure_kind="test", output_tail="kaboom output"
+        ),
+    )
+    body = render_body(result, "https://x/1")
+    assert "Transitive dependencies" in body
+    assert "kaboom output" in body
+
+
+def test_render_body_transitive_section_present_even_with_no_top_level_outcomes():
+    """A run with with-groups/without-groups/only-groups filtering out
+    every top-level package can still have a real transitive result."""
+    result = UpdateResult(outcomes=[], transitive=TransitiveOutcome(status="unchanged"))
+    body = render_body(result, "https://x/1")
+    assert "No packages were updated" in body
+    assert "Transitive dependencies" in body
+
+
+def test_render_body_stays_under_budget_with_a_large_transitive_changed_list():
+    result = UpdateResult(
+        outcomes=[_outcome(name=f"pkg-{i}") for i in range(500)],
+        transitive=TransitiveOutcome(
+            status="updated",
+            changed_packages=[
+                ChangedTransitivePackage(name=f"t-{i}", old="1.0.0", new="1.0.1")
+                for i in range(2000)
+            ],
+        ),
+    )
+    body = render_body(result, "https://x/1")
+    assert len(body) <= MAX_BODY_CHARS
+
+
+def test_default_off_render_body_unaffected_by_transitive_feature():
+    """Byte-compat: a run that never sets result.transitive renders
+    exactly as it did before update-transitive existed."""
+    result = UpdateResult(outcomes=[_outcome(name="a")])
+    body = render_body(result, "https://x/1")
+    assert "\U0001f501" not in body

@@ -105,6 +105,13 @@ class Config:
     run_id: str
     github_output: str
     github_step_summary: str = ""
+    # Added after the fields above (issues #24/#4) - defaulted so existing
+    # callers that construct a Config without knowing about them (tests,
+    # mainly) keep working unchanged.
+    update_transitive: bool = False
+    with_groups: str = ""
+    without_groups: str = ""
+    only_groups: str = ""
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> Config:
@@ -130,6 +137,10 @@ class Config:
             strategy=get("STRATEGY", "per-package"),
             create_issues=parse_bool(get("CREATE_ISSUES", "false")),
             issue_labels=get("ISSUE_LABELS"),
+            update_transitive=parse_bool(get("UPDATE_TRANSITIVE", "false")),
+            with_groups=get("WITH_GROUPS"),
+            without_groups=get("WITHOUT_GROUPS"),
+            only_groups=get("ONLY_GROUPS"),
             actor=get("GITHUB_ACTOR", "github-actions[bot]"),
             server_url=get("GITHUB_SERVER_URL", "https://github.com"),
             repository=get("GITHUB_REPOSITORY", ""),
