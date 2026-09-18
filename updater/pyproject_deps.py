@@ -17,6 +17,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .groups import uv_known_groups
+
 _NAME_RE = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 _SOURCE_KEYS = {"git", "path", "url", "workspace"}
 
@@ -162,23 +164,81 @@ def find_pep_declaration(data: dict, package: str) -> PepDeclaration | None:
     return None
 
 
-def _group_included(
-    group: str | None,
+def _dependency_group_includes(data: dict) -> dict[str, set[str]]:
+    """`group name -> set of group names it includes`, one level - every
+    `{"include-group": "..."}` table entry directly inside a
+    `[dependency-groups]` (PEP 735) group. `_group_closure` below follows
+    this transitively. Never raises on a reference to a group that turns
+    out not to exist (uv itself would refuse to lock such a project) -
+    `_group_closure` simply finds nothing more to add for it."""
+    includes: dict[str, set[str]] = {}
+    for group_name, group_entries in (data.get("dependency-groups") or {}).items():
+        for entry in group_entries or []:
+            if isinstance(entry, dict) and isinstance(entry.get("include-group"), str):
+                includes.setdefault(group_name, set()).add(entry["include-group"])
+    return includes
+
+
+def _group_closure(group: str, includes: dict[str, set[str]]) -> set[str]:
+    """Every group reachable from `group` by following `include-group`
+    edges, `group` itself always included - cycle-safe (a real
+    `include-group` cycle is rejected by uv itself at lock time, verified
+    against real uv==0.12.14: "Detected a cycle in `dependency-groups`" -
+    but this never assumes that; a group already visited is simply never
+    revisited, so a cycle just makes the closure stop growing rather than
+    looping forever)."""
+    seen: set[str] = set()
+    stack = [group]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(includes.get(current, ()))
+    return seen
+
+
+def _active_reachable_groups(
+    data: dict,
     without_groups: tuple[str, ...],
     only_groups: tuple[str, ...],
-) -> bool:
+) -> set[str]:
+    """Every group name a requirement's own *declaring* group may match
+    against to still be considered active this run - the transitive
+    `include-group` closure (PEP 735) of whichever groups are themselves
+    active, mirroring uv's own semantics (verified against real
+    uv==0.12.14): `--no-group x` deactivates `x` as a root, but a package
+    declared under `x` is still installed if some *other* still-active
+    group's own `include-group` chain reaches `x` - e.g. given `test =
+    ["certifi"]` and `dev = [{include-group = "test"}, "six"]`, `uv sync
+    --no-group test` still installs certifi via `dev`, and `--only-group
+    dev` installs both six and certifi, while `--only-group test` installs
+    only certifi (dev does not reach test the other way around).
+
+    With none of `with_groups`/`without_groups`/`only_groups` set, every
+    known group is already a root (today's "list everything" default -
+    see `list_top_level_dependency_names`), so the closure computation
+    changes nothing in that case - it only matters once `without_groups`/
+    `only_groups` actually narrows the active roots."""
+    includes = _dependency_group_includes(data)
+    roots = set(only_groups) if only_groups else uv_known_groups(data) - set(without_groups)
+    reachable: set[str] = set()
+    for root in roots:
+        reachable |= _group_closure(root, includes)
+    return reachable
+
+
+def _group_included(group: str | None, reachable_groups: set[str]) -> bool:
     """Whether a requirement tagged with `group` (see
-    `list_top_level_dependency_names`) should be iterated at all -
-    `with_groups` never has any effect here (see that function's
-    docstring for why), only `without_groups`/`only_groups`. `group` is
-    `None` for an optional-dependencies (extras) entry, which is always
-    included - extras are a separate axis `with-groups`/`without-groups`/
-    `only-groups` (issue #4) does not touch."""
+    `list_top_level_dependency_names`) should be iterated at all. `group`
+    is `None` for an optional-dependencies (extras) entry, which is
+    always included - extras are a separate axis `with-groups`/
+    `without-groups`/`only-groups` (issue #4) does not touch.
+    `reachable_groups` already folds in with/without/only *and* PEP 735
+    `include-group` transitivity - see `_active_reachable_groups`."""
     if group is None:
         return True
-    if only_groups:
-        return group in only_groups
-    return group not in without_groups
+    return group in reachable_groups
 
 
 def has_uv_conflicts(pyproject_path: Path) -> bool:
@@ -217,12 +277,24 @@ def list_top_level_dependency_names(
     matters for `UvBackend.sync()`'s own selection (see
     `groups.uv_group_sync_args`). An optional-dependencies extra is always
     iterated regardless of any of the three - extras are a separate axis
-    this feature does not touch."""
+    this feature does not touch.
+
+    A requirement's own *declaring* group is not the only way it can be
+    reached: PEP 735's `{"include-group": "..."}` entries mean a group can
+    pull in another group's members wholesale, transitively, and uv honors
+    that when deciding what `--only-group`/`--no-group` actually select
+    (verified against real uv==0.12.14 - see `_active_reachable_groups`'s
+    own docstring for the exact semantics, including the surprising one:
+    `without_groups` naming a group that is still reachable through some
+    other active group does not remove its members)."""
     data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
     # (requirement, group) pairs; group is None for an extra (always
     # included - see _group_included), "main" for a plain dependency, the
-    # dependency-groups/tool.uv.dev-dependencies group name otherwise.
+    # dependency-groups/tool.uv.dev-dependencies group name otherwise -
+    # each requirement's own *declaring* group, before include-group
+    # transitivity (_active_reachable_groups, applied below) decides
+    # whether that declaring group is actually reachable this run.
     requirements: list[tuple[str, str | None]] = []
 
     project = data.get("project") or {}
@@ -243,10 +315,11 @@ def list_top_level_dependency_names(
     requirements += [(r, "dev") for r in (tool_uv.get("dev-dependencies") or [])]
 
     sources = {normalize_name(k): v for k, v in (tool_uv.get("sources") or {}).items()}
+    reachable_groups = _active_reachable_groups(data, tuple(without_groups), tuple(only_groups))
 
     names = set()
     for requirement, group in requirements:
-        if not _group_included(group, tuple(without_groups), tuple(only_groups)):
+        if not _group_included(group, reachable_groups):
             continue
         name = _requirement_name(requirement)
         if name is None:

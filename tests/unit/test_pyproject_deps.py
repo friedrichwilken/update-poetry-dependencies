@@ -406,3 +406,113 @@ def test_with_groups_alone_has_no_effect_on_listing(tmp_path):
     assert list_top_level_dependency_names(
         path, with_groups=("docs",)
     ) == list_top_level_dependency_names(path)
+
+
+# --- PEP 735 include-group transitivity (issue #4 review fix) ----------------
+
+
+def _write_include_group(tmp_path):
+    """The canonical PEP 735 example: test = ["certifi"], dev = [include
+    test, "six"] - verified against real uv==0.12.14 that `--only-group
+    dev` installs both six and certifi, `--only-group test` installs only
+    certifi, `--no-group test` still installs certifi (via dev's own
+    reach - dev is untouched), and `--all-groups --no-group dev` still
+    installs certifi (via test, still its own active root) but not six."""
+    return write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        test = ["certifi"]
+        dev = [{include-group = "test"}, "six"]
+        """,
+    )
+
+
+def test_include_group_default_includes_everything(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path) == ["certifi", "idna", "six"]
+
+
+def test_include_group_only_dev_pulls_in_test_transitively(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path, only_groups=("dev",)) == ["certifi", "six"]
+
+
+def test_include_group_only_test_does_not_pull_in_dev(tmp_path):
+    path = _write_include_group(tmp_path)
+    assert list_top_level_dependency_names(path, only_groups=("test",)) == ["certifi"]
+
+
+def test_include_group_without_test_keeps_certifi_reachable_via_dev(tmp_path):
+    """The surprising one, verified against real uv: excluding "test"
+    does not drop certifi, because "dev" (still active) reaches it
+    transitively - mirrors `uv sync --all-groups --no-group test`."""
+    path = _write_include_group(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("test",))
+    assert names == ["certifi", "idna", "six"]
+
+
+def test_include_group_without_dev_drops_six_but_keeps_certifi(tmp_path):
+    """ "test" is still its own active root (only "dev" was excluded), so
+    certifi (declared directly under "test") stays; six (only declared
+    under "dev") is dropped - mirrors `uv sync --all-groups --no-group dev`."""
+    path = _write_include_group(tmp_path)
+    names = list_top_level_dependency_names(path, without_groups=("dev",))
+    assert names == ["certifi", "idna"]
+
+
+def test_include_group_nested_multiple_levels(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        a = ["certifi"]
+        b = [{include-group = "a"}, "six"]
+        c = [{include-group = "b"}, "zipp"]
+        """,
+    )
+    names = list_top_level_dependency_names(path, only_groups=("c",))
+    assert names == ["certifi", "six", "zipp"]
+
+
+def test_include_group_cycle_does_not_hang(tmp_path):
+    """A real include-group cycle is rejected by uv itself at lock time
+    (verified: "Detected a cycle in `dependency-groups`") - this must
+    still never loop forever if one somehow reaches this code."""
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = []
+
+        [dependency-groups]
+        a = [{include-group = "b"}, "certifi"]
+        b = [{include-group = "a"}, "six"]
+        """,
+    )
+    names = list_top_level_dependency_names(path, only_groups=("a",))
+    assert names == ["certifi", "six"]
+
+
+def test_include_group_reference_to_unknown_group_is_harmless(tmp_path):
+    path = write(
+        tmp_path,
+        """
+        [project]
+        name = "x"
+        dependencies = ["idna"]
+
+        [dependency-groups]
+        dev = [{include-group = "doesnotexist"}, "six"]
+        """,
+    )
+    assert list_top_level_dependency_names(path, only_groups=("dev",)) == ["six"]
