@@ -50,12 +50,13 @@ jobs:
         run: uv run ruff format --check .
 
   e2e:
-    name: e2e (${{ matrix.package_manager }})
+    name: e2e (${{ matrix.package_manager }}${{ matrix.name_suffix }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - package_manager: poetry
+            name_suffix: ''
             directory: tests/fixture/poetry
             # Deliberately different from the updater's own pinned 3.14
             # interpreter (see action.yml), to prove the project venv is
@@ -64,11 +65,32 @@ jobs:
             python_version: '3.12'
             test_command: 'poetry run python check.py'
             venv_python_command: 'poetry run python --version'
+            allow_major: 'false'
+            scenario: basic
           - package_manager: uv
+            name_suffix: ''
             directory: tests/fixture/uv
             python_version: '3.13'
             test_command: 'uv run python check.py'
             venv_python_command: 'uv run python --version'
+            allow_major: 'false'
+            scenario: basic
+          - package_manager: poetry
+            name_suffix: ', major'
+            directory: tests/fixture/poetry-major
+            python_version: '3.12'
+            test_command: 'poetry run python check.py'
+            venv_python_command: 'poetry run python --version'
+            allow_major: 'true'
+            scenario: major
+          - package_manager: uv
+            name_suffix: ', major'
+            directory: tests/fixture/uv-major
+            python_version: '3.13'
+            test_command: 'uv run python check.py'
+            venv_python_command: 'uv run python --version'
+            allow_major: 'true'
+            scenario: major
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -82,14 +104,17 @@ jobs:
           package-manager: ${{ matrix.package_manager }}
           directory: ${{ matrix.directory }}
           test-command: ${{ matrix.test_command }}
+          allow-major: ${{ matrix.allow_major }}
           dry-run: 'true'
           github_token: ${{ github.token }}
 
-      - name: Assert reported outputs
+      - name: Assert reported outputs (basic scenario)
+        if: matrix.scenario == 'basic'
         env:
           PASSED: ${{ steps.update.outputs.passed-packages }}
           FAILED: ${{ steps.update.outputs.failed-packages }}
           SKIPPED: ${{ steps.update.outputs.skipped-packages }}
+          HELD_BACK: ${{ steps.update.outputs.held-back-packages }}
         run: |
           status=0
 
@@ -108,12 +133,84 @@ jobs:
             status=1
           fi
 
+          if [ -n "$HELD_BACK" ]; then
+            echo "expected held-back-packages to be empty, got '$HELD_BACK'"
+            status=1
+          fi
+
+          exit $status
+
+      - name: Assert reported outputs (major scenario)
+        if: matrix.scenario == 'major'
+        env:
+          PASSED: ${{ steps.update.outputs.passed-packages }}
+          FAILED: ${{ steps.update.outputs.failed-packages }}
+          SKIPPED: ${{ steps.update.outputs.skipped-packages }}
+          HELD_BACK: ${{ steps.update.outputs.held-back-packages }}
+        run: |
+          status=0
+
+          if [ "$PASSED" != "charset-normalizer,zipp" ]; then
+            echo "expected passed-packages=charset-normalizer,zipp, got '$PASSED'"
+            status=1
+          fi
+
+          if [ -n "$FAILED" ]; then
+            echo "expected failed-packages to be empty, got '$FAILED'"
+            status=1
+          fi
+
+          if [ -n "$SKIPPED" ]; then
+            echo "expected skipped-packages to be empty, got '$SKIPPED'"
+            status=1
+          fi
+
+          if [ "$HELD_BACK" != "charset-normalizer" ]; then
+            echo "expected held-back-packages=charset-normalizer, got '$HELD_BACK'"
+            status=1
+          fi
+
           exit $status
 
       - name: Assert report-json shape
         env:
           REPORT_JSON: ${{ steps.update.outputs.report-json }}
+          SCENARIO: ${{ matrix.scenario }}
         run: python3 .github/scripts/assert_report_json.py
+
+      - name: Assert manifest changes match the major-bump scenario
+        if: matrix.scenario == 'major'
+        working-directory: ${{ matrix.directory }}
+        run: |
+          status=0
+
+          # zipp's major bump must have raised its declared constraint -
+          # the original capped upper bound (<4.0) must be gone, whether
+          # the backend rewrote the whole constraint (Poetry) or only
+          # dropped the upper bound while keeping the lower one (uv).
+          zipp_line="$(grep -i zipp pyproject.toml)"
+          echo "zipp line: $zipp_line"
+          case "$zipp_line" in
+            *'<4.0'*)
+              echo "expected zipp's original capped upper bound (<4.0) to be gone"
+              status=1
+              ;;
+          esac
+
+          # charset-normalizer's held-back major bump must leave its
+          # manifest constraint byte-identical - only the lock file (the
+          # in-range fallback) may have changed for it.
+          cn_line="$(grep -i charset-normalizer pyproject.toml)"
+          echo "charset-normalizer line: $cn_line"
+          case "$cn_line" in
+            *'2.0.0'*'3.0'*) ;;
+            *)
+              echo "expected charset-normalizer's original constraint (>=2.0.0,<3.0) to be unchanged"
+              status=1
+              ;;
+          esac
+
+          exit $status
 
       - name: Verify the fixture environment is healthy after the run
         working-directory: ${{ matrix.directory }}

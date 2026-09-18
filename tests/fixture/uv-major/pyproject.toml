@@ -1,0 +1,9 @@
+[project]
+name = "update-poetry-dependencies-uv-major-fixture"
+version = "0.1.0"
+description = "Fixture project for the update-poetry-dependencies action e2e test (allow-major, uv backend)."
+requires-python = ">=3.10,<4.0"
+dependencies = [
+    "zipp>=3.9.0,<4.0",
+    "charset-normalizer>=2.0.0,<3.0",
+]

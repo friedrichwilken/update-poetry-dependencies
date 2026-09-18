@@ -20,6 +20,7 @@ def make_cfg(**overrides):
         base_branch="",
         github_base_ref="",
         dry_run=False,
+        allow_major=False,
         actor="actor",
         server_url="https://github.com",
         repository="owner/repo",
@@ -254,3 +255,43 @@ def test_job_summary_is_written_even_in_dry_run(tmp_path):
 
     assert summary_file.exists()
     assert summary_file.read_text().strip() != ""
+
+
+# --- Uncommitted manifest/lock changes fail fast (review fix) -----------
+
+
+def test_uncommitted_manifest_or_lock_changes_fail_fast_before_any_work():
+    cfg = make_cfg(dry_run=True)
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"], uncommitted=True)
+    gh = FakeGithubPR(open_pr_number=None)
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    # must fail before any package was touched
+    assert backend.install_calls == 0
+    assert backend.updated_packages == []
+    assert git.commit_messages == []
+
+
+def test_uncommitted_check_covers_both_manifest_and_lock_regardless_of_allow_major():
+    cfg = make_cfg(dry_run=True, allow_major=False)
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"], uncommitted=False)
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert git.has_uncommitted_changes_calls == [["pyproject.toml", "poetry.lock"]]
+
+
+def test_clean_working_tree_proceeds_normally():
+    cfg = make_cfg(dry_run=True, allow_major=True)
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"], uncommitted=False)
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert backend.install_calls == 1

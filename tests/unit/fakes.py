@@ -26,11 +26,14 @@ class FakeBackend:
         sync_ok: bool = True,
         lock_file: str = "poetry.lock",
         versions: dict | None = None,
+        major_attempts: dict | None = None,
+        manifest_file: str = "pyproject.toml",
     ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
         self._sync_ok = sync_ok
         self.lock_file = lock_file
+        self.manifest_file = manifest_file
         self.updated_packages: list[str] = []
         self.sync_calls = 0
         self.install_calls = 0
@@ -41,6 +44,15 @@ class FakeBackend:
         # do not need to supply any.
         self._versions = {k: list(v) for k, v in (versions or {}).items()}
         self.locked_version_calls: list[str] = []
+        # major_attempts[package] is a `MajorAttempt | None` (or a
+        # zero-arg callable returning one, for a test that wants to
+        # observe state at call time) returned by try_major(package).
+        # Packages not present in the map get None (no attempt needed) -
+        # this also means a test that never enables allow_major never
+        # needs to populate this at all.
+        self._major_attempts = major_attempts or {}
+        self.try_major_calls: list[str] = []
+        self.major_files_to_stage_calls = 0
 
     def lock_exists(self) -> bool:
         return self._lock_exists
@@ -50,6 +62,15 @@ class FakeBackend:
 
     def files_to_stage(self) -> list[str]:
         return [self.lock_file]
+
+    def major_files_to_stage(self) -> list[str]:
+        self.major_files_to_stage_calls += 1
+        return [self.manifest_file, self.lock_file]
+
+    def try_major(self, package: str):
+        self.try_major_calls.append(package)
+        attempt = self._major_attempts.get(package)
+        return attempt() if callable(attempt) else attempt
 
     def install(self) -> CommandResult:
         self.install_calls += 1
@@ -82,16 +103,19 @@ class FakeGit:
         diff_results: list | None = None,
         head_shas: list | None = None,
         current_branch: str = "main",
+        uncommitted: bool = False,
     ):
         self._diff_results = list(diff_results or [])
         self._head_shas = list(head_shas or ["sha0"])
         self._current_branch = current_branch
+        self._uncommitted = uncommitted
         self.reset_calls: list[list[str]] = []
         self.staged_calls: list[list[str]] = []
         self.commit_messages: list[str] = []
         self.checkout_branches: list[str] = []
         self.push_branches: list[str] = []
         self.configured = False
+        self.has_uncommitted_changes_calls: list[list[str]] = []
 
     def configure_user(self, name: str, email: str) -> None:
         self.configured = True
@@ -106,6 +130,10 @@ class FakeGit:
 
     def diff_changed(self, paths: list[str]) -> bool:
         return self._diff_results.pop(0)
+
+    def has_uncommitted_changes(self, paths: list[str]) -> bool:
+        self.has_uncommitted_changes_calls.append(list(paths))
+        return self._uncommitted
 
     def reset_files(self, paths: list[str]) -> None:
         self.reset_calls.append(list(paths))

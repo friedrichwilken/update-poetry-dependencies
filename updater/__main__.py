@@ -38,6 +38,21 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     # have already been updated, committed and pushed.
     base_branch = resolve_base_branch(cfg.base_branch, git.current_branch(), cfg.github_base_ref)
 
+    # Fail fast, before anything else, if the manifest/lock file already
+    # have uncommitted changes: the update loop's `reset_files` would
+    # otherwise discard them on a discarded update, or `stage`/`commit`
+    # would silently sweep them into one of this run's own commits.
+    # Checked regardless of allow-major - the lock file is always at risk
+    # even when the manifest itself is never touched.
+    tracked_files = backend.major_files_to_stage()
+    if git.has_uncommitted_changes(tracked_files):
+        raise ActionError(
+            f"{cfg.directory} has uncommitted changes to {', '.join(tracked_files)}; "
+            "commit or stash them before running this action - the update loop "
+            "resets and commits these files itself and would otherwise either "
+            "discard or absorb those changes"
+        )
+
     if not backend.lock_exists():
         raise ActionError(f"{backend.lock_file_path()} not found; nothing to update")
 
@@ -58,7 +73,15 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     run_url = f"{cfg.server_url}/{cfg.repository}/actions/runs/{cfg.run_id}"
 
     try:
-        result = run_updates(backend, git, runner, packages, cfg.test_command, cfg.directory)
+        result = run_updates(
+            backend,
+            git,
+            runner,
+            packages,
+            cfg.test_command,
+            cfg.directory,
+            allow_major=cfg.allow_major,
+        )
     except UpdateAborted as exc:
         # Some packages were already processed (and, for passing ones,
         # already committed) before the abort - report on that partial
@@ -68,7 +91,11 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
         # like any other failure below the install step).
         partial_body = render_body(exc.result, run_url, aborted_reason=str(exc))
         partial_summary = render_body(
-            exc.result, run_url, max_chars=MAX_SUMMARY_CHARS, aborted_reason=str(exc)
+            exc.result,
+            run_url,
+            max_chars=MAX_SUMMARY_CHARS,
+            aborted_reason=str(exc),
+            include_major_skip_notes=True,
         )
         write_outputs(
             cfg.github_output,
@@ -81,7 +108,9 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
         raise
 
     body = render_body(result, run_url)
-    summary_body = render_body(result, run_url, max_chars=MAX_SUMMARY_CHARS)
+    summary_body = render_body(
+        result, run_url, max_chars=MAX_SUMMARY_CHARS, include_major_skip_notes=True
+    )
     write_outputs(
         cfg.github_output, result, body, cfg.github_step_summary, summary_body=summary_body
     )
