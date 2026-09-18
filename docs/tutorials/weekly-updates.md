@@ -347,43 +347,7 @@ jobs:
 
 ## 9. Hands-off: auto-merge the PR when CI is green
 
-There's no `pr-number`/`pr-url` output on this action today, so key a separate, `pull_request`-triggered workflow off the fixed branch name this action always uses instead — the same pattern this repo uses for its own Dependabot PRs.
-
-Add a second workflow file, `.github/workflows/automerge-deps.yml`:
-
-```yaml
-name: auto-merge dependency updates
-on:
-  pull_request:                     # <- fires when the update PR is opened/updated
-    branches: [main]
-
-permissions:
-  contents: write
-  pull-requests: write
-
-jobs:
-  automerge:
-    if: |                           # <- only this action's own PR, never a fork
-      github.head_ref == 'deps/test-gated-updates' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - name: Enable auto-merge
-        env:
-          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}       # <- same PAT as the update workflow
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PR_URL"         # <- merges once required checks pass
-```
-
-This only fires on a real `pull_request` event, which needs the PAT from step 3 (`GITHUB_TOKEN` PRs never trigger it). It also needs **Settings → General → Pull Requests → "Allow auto-merge"** on, and at least one required status check in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
-
-A PR from a fork never receives this workflow's secrets, so `gh pr merge` could not authenticate even if the branch-name check above matched one — the extra repository-owner condition just makes that explicit rather than relying on it implicitly.
-
-**What you should see:** once the required checks pass, the PR merges itself. If "Allow auto-merge" is off, the step fails loudly instead: turn the setting on and re-run.
-
-## 10. The final workflow
-
-Two files, together:
+`pr-url` (empty in `dry-run`, or when nothing was pushed) names the PR this run created or edited — give the action step an `id` and add one more step in the same job instead of a second, `pull_request`-triggered workflow.
 
 ```yaml
 name: update dependencies
@@ -410,6 +374,7 @@ jobs:
           token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 
       - uses: friedrichwilken/test-gated-python-updates@v2
+        id: update   # <- names this step so the step below can read its outputs
         with:
           test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
           pr-title-prefix: '[deps] '
@@ -422,30 +387,76 @@ jobs:
           update-transitive: 'true'
           without-groups: 'dev'
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
+
+      - name: Auto-merge when checks pass   # <- one extra step, no second workflow needed
+        if: steps.update.outputs.pr-url != ''   # <- skip in dry-run or when nothing was pushed
+        run: gh pr merge --auto --squash "$PR_URL"   # <- merges once required checks pass
+        env:                                    # <- passes the PR and the token to gh
+          PR_URL: ${{ steps.update.outputs.pr-url }}   # <- this run's own PR (see outputs.md)
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}   # <- same PAT as the update step
 ```
 
+This needs the PAT, not `GITHUB_TOKEN`, for the same reason as step 3: the required status checks it waits for are `pull_request` workflows, which a PR opened with `GITHUB_TOKEN` never triggers — `gh pr merge --auto` would then wait forever on checks that never run.
+
+It also needs **Settings → General → Pull Requests → "Allow auto-merge"** on, and at least one required status check in branch protection — otherwise `gh pr merge --auto` has nothing to wait for and merges immediately.
+
+**What you should see:**
+
+- Once the required checks pass, the PR merges itself.
+- In `dry-run`, or a run with nothing to update: the auto-merge step is skipped (`pr-url` is empty).
+- If "Allow auto-merge" is off: the step fails loudly instead — turn the setting on and re-run.
+
+More: [`pr-url`/`pr-number`](../manual/outputs.md#using-pr-url).
+
+## 10. The final workflow
+
+One workflow, start to finish:
+
 ```yaml
-name: auto-merge dependency updates
+name: update dependencies
 on:
-  pull_request:
-    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
-  automerge:
-    if: |
-      github.head_ref == 'deps/test-gated-updates' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+  update:
     runs-on: ubuntu-latest
     steps:
-      - name: Enable auto-merge
-        env:
-          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.DEPS_UPDATE_TOKEN }}
+
+      - uses: friedrichwilken/test-gated-python-updates@v2
+        id: update
+        with:
+          test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'
+          pr-title-prefix: '[deps] '
+          pr-labels: 'dependencies'
+          base-branch: 'main'
+          strategy: 'batch-first'
+          allow-major: 'true'
+          create-issues: 'true'
+          issue-labels: 'dependencies'
+          update-transitive: 'true'
+          without-groups: 'dev'
+          github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
+
+      - name: Auto-merge when checks pass
+        if: steps.update.outputs.pr-url != ''
         run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ steps.update.outputs.pr-url }}
+          GH_TOKEN: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
 Every input above, in the manual:
@@ -461,5 +472,6 @@ Every input above, in the manual:
 - tokens and the `permissions:`/`issues: write` blocks — [token-and-permissions.md](../manual/token-and-permissions.md)
 - how the loop, the fixed branch and the PR itself behave — [how-it-works.md](../manual/how-it-works.md)
 - the PR body / job summary this produces — [pr-report.md](../manual/pr-report.md)
+- the `pr-number`/`pr-url` outputs behind step 9's auto-merge step — [outputs.md](../manual/outputs.md)
 
 This repository runs this same workflow on itself every week — see [`update_dependencies.yml`](../../.github/workflows/update_dependencies.yml) for a complete, currently-running example.
