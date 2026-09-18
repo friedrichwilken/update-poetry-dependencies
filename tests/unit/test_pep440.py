@@ -1,6 +1,6 @@
 import pytest
 
-from updater.pep440 import compare_versions, is_prerelease, parse_version
+from updater.pep440 import bump_kind, compare_versions, is_prerelease, parse_version
 
 
 @pytest.mark.parametrize(
@@ -65,3 +65,28 @@ def test_compare_versions_orders_lower_before_higher(lower, higher):
 
 def test_compare_versions_equal():
     assert compare_versions(parse_version("1.2.3"), parse_version("1.2.3")) == 0
+
+
+# --- bump_kind (review fix: truthful "major"/"minor"/"patch"/"other") ---
+
+
+@pytest.mark.parametrize(
+    "old, new, kind",
+    [
+        ("1.0.0", "2.0.0", "major"),
+        ("1.0.0", "1.1.0", "minor"),
+        ("1.0.0", "1.0.1", "patch"),
+        ("3.23.1", "4.1.0", "major"),
+        ("2.0.12", "2.1.1", "minor"),
+        ("1.0.0", "1.0.0", "other"),
+        ("1.0", "1.0.post1", "other"),
+        (None, "1.0.0", "other"),
+        ("1.0.0", None, "other"),
+        ("1.0.0, 2.0.0", "3.0.0", "other"),
+        ("not-a-version", "1.0.0", "other"),
+        ("1.0.0", "not-a-version", "other"),
+        ("", "1.0.0", "other"),
+    ],
+)
+def test_bump_kind(old, new, kind):
+    assert bump_kind(old, new) == kind

@@ -111,7 +111,11 @@ def pep508_strip_upper_bound(clauses: list[Clause]) -> str:
 
 # --- Poetry shorthand constraints -------------------------------------------
 
-_POETRY_CLAUSE_RE = re.compile(r"^\s*(\^|~|==|!=|<=|>=|<|>)?\s*(.+?)\s*$")
+# "~=" (PEP 440/508's compatible-release operator, which poetry-core also
+# accepts inside its own tables) must be tried before the bare "~" (Poetry's
+# own, differently-scoped "approx" operator), or "~=2.1" would wrongly parse
+# as op="~", version="=2.1".
+_POETRY_CLAUSE_RE = re.compile(r"^\s*(\^|~=|~|==|!=|<=|>=|<|>)?\s*(.+?)\s*$")
 
 
 def poetry_parse_constraint(text: str) -> list[Clause] | None:
@@ -145,9 +149,7 @@ def poetry_has_upper_bound(clauses: list[Clause]) -> bool:
     for clause in clauses:
         if clause.op in _UPPER_BOUND_OPS:
             return True
-        if clause.op == "^":
-            return True
-        if clause.op == "~":
+        if clause.op in ("^", "~", "~="):
             return True
         if clause.version.rstrip().endswith(".*"):
             return True
@@ -166,6 +168,60 @@ def poetry_is_exact_pin(clauses: list[Clause]) -> bool:
         return False
     clause = clauses[0]
     return clause.op == "==" and not clause.version.rstrip().endswith(".*")
+
+
+def all_clauses_parseable(clauses: list[Clause]) -> bool:
+    """True if every clause's version parses as a PEP 440-ish version (once
+    any `.*` wildcard suffix is stripped) - used as a stronger check than
+    the clause regexes above, which only validate operator *syntax*, not
+    that the version part is real. A clause like "^abc" matches the regex
+    shape fine but is not a version this action should trust itself to
+    reason about (has_upper_bound/is_exact_pin), so callers treat a False
+    result the same as an unparsable constraint."""
+    return all(parse_clause_version(c) is not None for c in clauses)
+
+
+def poetry_classify_constraint(text: str) -> tuple[bool, str | None]:
+    """Classify a full Poetry-syntax constraint string (`tool.poetry.*`),
+    including its `||` OR syntax (e.g. ">=1.0,<2.0 || >=3.0"), which
+    `poetry_parse_constraint` alone does not understand (naively comma
+    splitting it would silently garble the second alternative). Returns
+    `(needed, skip_reason)`:
+
+    - `(True, None)`: a major-bump attempt should be planned.
+    - `(False, None)`: no attempt is needed - some part of the constraint
+      already has no effective upper bound, so the ordinary in-range
+      update already reaches arbitrarily high versions. For an OR'd
+      constraint this holds as soon as *any* alternative is open-ended,
+      since the union as a whole is then still unbounded.
+    - `(False, "<reason>")`: skip - either unparsable, an exact pin, or
+      (for an OR'd constraint where every alternative does have its own
+      upper bound) "unsupported constraint syntax", since rewriting a
+      multi-range OR constraint safely is not attempted.
+    """
+    text = (text or "").strip()
+
+    if "||" in text:
+        alternatives = [alt.strip() for alt in text.split("||")]
+        parsed = [poetry_parse_constraint(alt) for alt in alternatives]
+        if any(p is None for p in parsed):
+            return False, "unparsable version constraint"
+        if any(not all_clauses_parseable(p) for p in parsed):
+            return False, "unparsable version constraint"
+        if any(not poetry_has_upper_bound(p) for p in parsed):
+            return False, None
+        return False, "unsupported constraint syntax"
+
+    clauses = poetry_parse_constraint(text)
+    if clauses is None:
+        return False, "unparsable version constraint"
+    if not all_clauses_parseable(clauses):
+        return False, "unparsable version constraint"
+    if poetry_is_exact_pin(clauses):
+        return False, "exact version pin"
+    if not poetry_has_upper_bound(clauses):
+        return False, None
+    return True, None
 
 
 # --- Shared helpers ----------------------------------------------------------

@@ -131,3 +131,35 @@ def is_prerelease(text: str) -> bool:
     callers that need parseability should check `parse_version` first."""
     version = parse_version(text)
     return bool(version and version.is_prerelease)
+
+
+def bump_kind(old_version: str | None, new_version: str | None) -> str:
+    """Which release segment actually changed between `old_version` and
+    `new_version`: `"major"`, `"minor"`, `"patch"`, or `"other"` - "other"
+    covers everything this classification cannot make a confident claim
+    about: a missing/unparsable version, `locked_version()`'s
+    comma-joined "more than one distinct locked version" case, the two
+    versions comparing equal, or a difference confined to a segment past
+    the first three (or a pre/post/dev/local-only difference, e.g.
+    "1.0" -> "1.0.post1")."""
+    if not old_version or not new_version or "," in old_version or "," in new_version:
+        return "other"
+
+    old = parse_version(old_version)
+    new = parse_version(new_version)
+    if old is None or new is None:
+        return "other"
+    if compare_versions(old, new) == 0:
+        return "other"
+
+    length = max(len(old.release), len(new.release), 3)
+    old_release = old.release + (0,) * (length - len(old.release))
+    new_release = new.release + (0,) * (length - len(new.release))
+
+    if old_release[0] != new_release[0]:
+        return "major"
+    if old_release[1] != new_release[1]:
+        return "minor"
+    if old_release[2] != new_release[2]:
+        return "patch"
+    return "other"
