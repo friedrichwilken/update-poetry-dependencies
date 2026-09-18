@@ -61,7 +61,7 @@ Never mix kinds. Tutorial listing every option loses the learner; reference tell
 4. Quick start: zero optional settings. Never explain a default.
 5. Prerequisites that make the first run fail go next to the quick start, as a short list.
 6. No option tables, internals, history, caveats -> manual. Caveat needed for the quick start => quick start is wrong.
-7. Show real output. Sample must be test-compared with what the code renders (invented samples drift).
+7. Show real output, RENDERED: markdown samples go in a blockquote (`> | a | b |`), not a code fence (fence shows raw pipes, reader sees no table). Sample must be test-compared with what the code renders (invented samples drift). Check the rendered page on GitHub, not just the source.
 8. Competitor comparison: separate manual page, only claims verifiable in their official docs, say when the competitor is the better choice. Not in README body.
 
 ### Tutorial

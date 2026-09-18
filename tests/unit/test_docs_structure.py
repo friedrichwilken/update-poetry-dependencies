@@ -85,6 +85,10 @@ def test_readme_line_limit():
 
 
 def test_readme_has_no_wide_tables():
+    # Blockquoted rows ("> | a | b |") are deliberately exempt: the README's
+    # "What you get" sample is a rendered copy of the real PR report, whose
+    # Failed table has four columns. `_TABLE_ROW_RE` only matches rows that
+    # start with "|", so quoted rows never reach the column check.
     lines = README.read_text(encoding="utf-8").splitlines()
     offenders = []
     for i, line in _strip_code_fences(lines):
