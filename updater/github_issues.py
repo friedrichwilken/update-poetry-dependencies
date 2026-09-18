@@ -239,12 +239,15 @@ def plan_issue_actions(
 
 
 def issue_actions_to_json(actions: list[IssueAction]) -> str:
-    """The public `issue-actions` output: a single-line JSON array of
-    `{package, action, issue}` - deliberately not the full `IssueAction`
-    (no `target`/`comment`), matching the field set the PR description
-    documents."""
+    """The public `issue-actions` output: a single-line, compact
+    (no-whitespace) JSON array of `{package, action, issue}` - deliberately
+    not the full `IssueAction` (no `target`/`comment`), matching the field
+    set the README documents. Compact separators so a consumer (or a shell
+    `case`/substring check, as in check_action.yml's e2e assertion) can
+    match the exact `{"package":"idna","action":"create","issue":null}`
+    shape without worrying about json.dumps' default `", "`/`": "` spacing."""
     records = [{"package": a.package, "action": a.action, "issue": a.issue} for a in actions]
-    return json.dumps(records)
+    return json.dumps(records, separators=(",", ":"))
 
 
 def render_issue_title(target: IssueTarget) -> str:
