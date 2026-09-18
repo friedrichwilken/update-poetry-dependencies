@@ -7,3 +7,11 @@ dependencies = [
     "idna>=3.4,<4.0",
     "six>=1.15.0,<2.0",
 ]
+
+# One dev-group member, exactly pinned so it never has anything to update
+# (deterministic forever, regardless of new releases) - used by the "e2e
+# (uv, groups)" job (without-groups: dev) to prove a group-excluded
+# top-level package is left out of report-json entirely, while idna/six
+# above are unaffected.
+[dependency-groups]
+dev = ["typing-extensions==4.12.2"]

@@ -79,6 +79,8 @@ jobs:
             # "create-issues" README section).
             create_issues: 'true'
             strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: basic
           - package_manager: uv
             name_suffix: ''
@@ -89,6 +91,8 @@ jobs:
             allow_major: 'false'
             create_issues: 'true'
             strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: basic
           - package_manager: poetry
             name_suffix: ', major'
@@ -99,6 +103,8 @@ jobs:
             allow_major: 'true'
             create_issues: 'false'
             strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: major
           - package_manager: uv
             name_suffix: ', major'
@@ -109,6 +115,8 @@ jobs:
             allow_major: 'true'
             create_issues: 'false'
             strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: major
           # strategy: batch-first (issue #23) - two families of entries:
           # "batch" reuses the basic fixtures, whose idna update
@@ -128,6 +136,8 @@ jobs:
             allow_major: 'false'
             create_issues: 'false'
             strategy: 'batch-first'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: batch-fallback
           - package_manager: uv
             name_suffix: ', batch'
@@ -138,6 +148,8 @@ jobs:
             allow_major: 'false'
             create_issues: 'false'
             strategy: 'batch-first'
+            update_transitive: 'false'
+            without_groups: ''
             scenario: batch-fallback
           - package_manager: poetry
             name_suffix: ', batch happy'
@@ -148,6 +160,8 @@ jobs:
             allow_major: 'false'
             create_issues: 'false'
             strategy: 'batch-first'
+            update_transitive: 'true'
+            without_groups: ''
             scenario: batch-happy
           - package_manager: uv
             name_suffix: ', batch happy'
@@ -158,7 +172,39 @@ jobs:
             allow_major: 'false'
             create_issues: 'false'
             strategy: 'batch-first'
+            update_transitive: 'true'
+            without_groups: ''
             scenario: batch-happy
+          # Dependency group selection (issue #4): reuses the batch
+          # fixtures (they already carry a "dev" group with one
+          # exactly-pinned member, typing-extensions - see their
+          # pyproject.toml) with without-groups: dev, and asserts that
+          # typing-extensions never shows up in report-json at all while
+          # idna/six (the "main" group) are unaffected.
+          - package_manager: poetry
+            name_suffix: ', groups'
+            directory: tests/fixture/poetry-batch
+            python_version: '3.12'
+            test_command: 'poetry run python check.py'
+            venv_python_command: 'poetry run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: 'dev'
+            scenario: groups
+          - package_manager: uv
+            name_suffix: ', groups'
+            directory: tests/fixture/uv-batch
+            python_version: '3.13'
+            test_command: 'uv run python check.py'
+            venv_python_command: 'uv run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'per-package'
+            update_transitive: 'false'
+            without_groups: 'dev'
+            scenario: groups
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -175,6 +221,8 @@ jobs:
           allow-major: ${{ matrix.allow_major }}
           create-issues: ${{ matrix.create_issues }}
           strategy: ${{ matrix.strategy }}
+          update-transitive: ${{ matrix.update_transitive }}
+          without-groups: ${{ matrix.without_groups }}
           dry-run: 'true'
           github_token: ${{ github.token }}
 
@@ -272,9 +320,46 @@ jobs:
 
           exit $status
 
+      - name: Assert reported outputs (groups scenario)
+        # without-groups: dev must exclude typing-extensions from being
+        # iterated at all - idna/six (the "main" group) are unaffected.
+        if: matrix.scenario == 'groups'
+        env:
+          PASSED: ${{ steps.update.outputs.passed-packages }}
+          FAILED: ${{ steps.update.outputs.failed-packages }}
+          SKIPPED: ${{ steps.update.outputs.skipped-packages }}
+          REPORT_JSON: ${{ steps.update.outputs.report-json }}
+        run: |
+          status=0
+
+          if [ "$PASSED" != "idna,six" ]; then
+            echo "expected passed-packages=idna,six, got '$PASSED'"
+            status=1
+          fi
+
+          if [ -n "$FAILED" ]; then
+            echo "expected failed-packages to be empty, got '$FAILED'"
+            status=1
+          fi
+
+          if [ -n "$SKIPPED" ]; then
+            echo "expected skipped-packages to be empty, got '$SKIPPED'"
+            status=1
+          fi
+
+          case "$REPORT_JSON" in
+            *typing-extensions*)
+              echo "expected typing-extensions to be excluded entirely by without-groups: dev, got '$REPORT_JSON'"
+              status=1
+              ;;
+          esac
+
+          exit $status
+
       - name: Assert report-json shape
         env:
           REPORT_JSON: ${{ steps.update.outputs.report-json }}
+          TRANSITIVE_REPORT: ${{ steps.update.outputs.transitive-report }}
           SCENARIO: ${{ matrix.scenario }}
         run: python3 .github/scripts/assert_report_json.py
 
