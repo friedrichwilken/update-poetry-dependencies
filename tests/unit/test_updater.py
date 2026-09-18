@@ -734,18 +734,45 @@ def test_batch_first_sequential_replay_divergence_failed_verification_falls_back
     assert outcome.batch_test_failed is False  # the batch's own test genuinely passed
 
 
-def test_batch_first_replay_step_itself_failing_discards_and_falls_back_immediately():
-    """A replay step failing outright (not just a differently-resolved
-    lock) skips the verification-test grace period entirely - there is no
-    coherent replayed state left to verify."""
+def test_batch_first_replay_update_itself_failing_discards_and_falls_back_immediately():
+    """A replay step's own `update_package()` call failing outright (not
+    just landing on a differently-resolved lock) skips the
+    verification-test grace period entirely - there is no coherent
+    replayed state left to verify."""
     backend = FakeBackend(
-        update_ok={"a": True, "b": True},
+        update_ok={"a": False, "b": True},
+        update_all_ok=True,  # the batch itself still resolves fine
         versions={"a": ["1.0.0", "1.1.0"], "b": ["2.0.0", "2.1.0"]},
     )
+    git = FakeGit(diff_results=[True, True], head_shas=["start-sha"])
+    runner = FakeRunner(shell_results=[result(True), result(True)])
+
+    res = run_updates(backend, git, runner, ["a", "b"], "pytest", "dir", strategy="batch-first")
+
+    assert git.hard_reset_calls == ["start-sha"]
+    # a's own update fails again in the fresh per-package fallback too
+    # (same update_ok); b still succeeds
+    assert res.failed == ["a"]
+    assert res.passed == ["b"]
+    assert all(o.strategy == "batch-first" for o in res.outcomes)
+    assert all(not o.tested_in_batch for o in res.outcomes)
+
+
+def test_batch_first_replay_no_diff_and_not_at_target_is_a_real_failure():
+    """Review fix: a replay step producing no lock change of its own is
+    only ever excused (see the "already achieved" test below) when it
+    landed exactly on the batch's own target version for that package - a
+    genuine mismatch (no change, and not at the target either) is still
+    a real replay failure, discarded and falling back to per-package."""
+    backend = FakeBackend(
+        update_ok={"a": True, "b": True},
+        versions={"a": ["1.0.0", "1.1.0"], "b": ["2.0.0", "2.5.0", "2.0.0"]},
+    )
     git = FakeGit(
-        # batch check, a's own replay diff (fails), then the fresh
+        # batch check; a's own replay diff; b's own replay diff (false -
+        # no change, and not at its 2.5.0 target either); then the fresh
         # per-package fallback loop's own diff check for a and for b
-        diff_results=[True, False, True, True],
+        diff_results=[True, True, False, True, True],
         head_shas=["start-sha"],
     )
     runner = FakeRunner(shell_results=[result(True), result(True), result(True)])
@@ -756,6 +783,93 @@ def test_batch_first_replay_step_itself_failing_discards_and_falls_back_immediat
     assert res.passed == ["a", "b"]
     assert all(o.strategy == "batch-first" for o in res.outcomes)
     assert all(not o.tested_in_batch for o in res.outcomes)
+    assert all(o.bundled_with is None for o in res.outcomes)
+
+
+def test_batch_first_replay_package_already_at_target_needs_no_separate_commit():
+    """Review fix: a package whose own replay step produces no lock
+    change because an *earlier* package's own update already pulled it
+    to the batch's target (a shared transitive dependency, most
+    commonly - reproduced for real locally with jsonschema+attrs on both
+    uv and Poetry) must not be treated as a replay failure - it is
+    reported as updated (old -> the batch's target) with no separate
+    commit of its own."""
+    backend = FakeBackend(
+        update_ok={"a": True, "b": True},
+        versions={"a": ["1.0.0", "1.1.0"], "b": ["2.0.0", "2.5.0", "2.5.0"]},
+    )
+    # batch check; a's own replay diff; b's own replay diff (false - no
+    # change of its own, because a's update already pulled it to 2.5.0)
+    git = FakeGit(diff_results=[True, True, False])
+    runner = FakeRunner(shell_results=[result(True)])
+
+    res = run_updates(backend, git, runner, ["a", "b"], "pytest", "dir", strategy="batch-first")
+
+    assert res.passed == ["a", "b"]
+    assert len(runner.shell_calls) == 1  # still only the one batch test run
+    # only one commit was made - for a; b's change is bundled into it
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.0"]
+
+    outcomes = {o.name: o for o in res.outcomes}
+    assert outcomes["a"].bundled_with is None
+    assert outcomes["b"].old_version == "2.0.0"
+    assert outcomes["b"].new_version == "2.5.0"
+    assert outcomes["b"].bundled_with == "a"
+    assert outcomes["b"].tested_in_batch is True
+    assert outcomes["b"].strategy == "batch-first"
+
+
+def test_batch_first_replay_commit_and_outcome_use_the_actual_replayed_version():
+    """Review fix (blocker): the batch's own precomputed locked_version()
+    read must never be trusted for the replay's own commit
+    message/outcome once a resolver genuinely resolves this package to a
+    different version alone (in the replay) than it did as part of the
+    larger batch - re-read right after this package's own
+    `update_package()` call instead. Reproduced by the reviewer as
+    "commit says 1.1.0, lock has 1.1.9"."""
+    backend = FakeBackend(
+        update_ok={"a": True},
+        versions={"a": ["1.0.0", "1.1.0", "1.1.9"]},
+        lock_snapshots=[{"a": "mid"}, {"a": "final-different"}],
+    )
+    git = FakeGit(diff_results=[True, True])
+    runner = FakeRunner(shell_results=[result(True), result(True)])
+
+    res = run_updates(backend, git, runner, ["a"], "pytest", "dir", strategy="batch-first")
+
+    assert res.passed == ["a"]
+    assert git.commit_messages == ["Update a 1.0.0 -> 1.1.9"]
+    assert res.outcomes[0].new_version == "1.1.9"
+
+
+def test_batch_first_fallback_tags_outcomes_even_when_the_fallback_itself_aborts():
+    """Review fix: a re-sync failure *inside* the per-package fallback
+    loop (after the batch itself fell back to it) must still carry
+    strategy/batch_test_failed on the partial outcomes in the raised
+    UpdateAborted - not just on a result that never gets returned because
+    the run raised instead of returning normally."""
+    sync_call_count = {"n": 0}
+
+    def flaky_sync():
+        sync_call_count["n"] += 1
+        # 1st call: the reset back to the start state before the
+        # per-package fallback loop begins - must succeed, or the
+        # fallback never even gets a chance to run. Every call after that
+        # (inside the fallback loop itself, for b's own failure) fails.
+        return result(sync_call_count["n"] == 1)
+
+    backend = FakeBackend(update_ok={"a": True, "b": False}, update_all_ok=True)
+    backend.sync = flaky_sync
+    git = FakeGit(diff_results=[True, True])
+    runner = FakeRunner(shell_results=[result(False, stderr="batch broke"), result(True)])
+
+    with pytest.raises(UpdateAborted) as excinfo:
+        run_updates(backend, git, runner, ["a", "b"], "pytest", "dir", strategy="batch-first")
+
+    partial = excinfo.value.result
+    assert [o.name for o in partial.outcomes] == ["a", "b"]
+    assert all(o.strategy == "batch-first" for o in partial.outcomes)
+    assert all(o.batch_test_failed for o in partial.outcomes)
 
 
 def test_batch_first_no_packages_returns_empty_result():
@@ -775,7 +889,12 @@ def test_batch_first_allow_major_layers_beyond_constraint_attempt_on_top_after_b
     journey (issue #23's documented interaction with allow-major)."""
     backend = FakeBackend(
         update_ok={"a": True},
-        versions={"a": ["1.0.0", "2.0.0", "3.0.0"]},
+        # calls, in order: old, batch-new (unused for the commit itself
+        # any more - see the replay-uses-actual-version fix), the
+        # replay's own fresh read (2.0.0, no divergence intended here),
+        # the post-replay correction read (2.0.0, unchanged), then the
+        # beyond-constraint attempt's own attempted-version read (3.0.0)
+        versions={"a": ["1.0.0", "2.0.0", "2.0.0", "2.0.0", "3.0.0"]},
         major_attempts={"a": MajorAttempt(resolve_result=result(True))},
     )
     git = FakeGit(diff_results=[True, True])
@@ -803,7 +922,11 @@ def test_batch_first_allow_major_layers_beyond_constraint_attempt_on_top_after_b
 def test_batch_first_allow_major_held_back_attaches_to_the_batch_outcome():
     backend = FakeBackend(
         update_ok={"a": True},
-        versions={"a": ["1.0.0", "2.0.0", "2.5.0"]},
+        # same call shape as the test above: old, batch-new, the replay's
+        # own read (2.0.0, kept - no divergence here), the post-replay
+        # correction read (2.0.0), then the held-back beyond-constraint
+        # attempt's own attempted-version read (2.5.0)
+        versions={"a": ["1.0.0", "2.0.0", "2.0.0", "2.0.0", "2.5.0"]},
         major_attempts={
             "a": MajorAttempt(resolve_result=result(False, stderr="could not resolve"))
         },

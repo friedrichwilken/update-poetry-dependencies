@@ -425,6 +425,8 @@ def _outcome_to_dict(o: PackageOutcome, drop_output: bool = False) -> dict:
         record["tested_in_batch"] = True
     if o.batch_test_failed:
         record["batch_test_failed"] = True
+    if o.bundled_with:
+        record["bundled_with"] = o.bundled_with
     return record
 
 

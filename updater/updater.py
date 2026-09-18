@@ -82,6 +82,15 @@ class PackageOutcome:
     - `batch_test_failed` is `True` on every outcome when the batch's own
       one-shot test run failed and this run fell back to the ordinary
       per-package loop for everything.
+    - `bundled_with` is set (to another package's name) when this
+      package's own sequential-replay step produced no lock change of its
+      own because it was already sitting at the batch's target version -
+      pulled there as a side effect of an *earlier* package's own update
+      in the same replay (most commonly a shared transitive dependency).
+      It is still reported as `updated` (old -> the batch's target), but
+      no separate commit exists for it - the change already lives in
+      whichever package's commit `bundled_with` names (see
+      `_replay_sequential`).
     """
 
     name: str
@@ -99,6 +108,7 @@ class PackageOutcome:
     strategy: str | None = None
     tested_in_batch: bool = False
     batch_test_failed: bool = False
+    bundled_with: str | None = None
 
     @property
     def held_back_beyond_constraint(self) -> bool:
@@ -468,8 +478,23 @@ def _fall_back_to_per_package(
     `strategy="batch-first"` (this run still requested batch-first, even
     though every package ended up going through the per-package path) and,
     when the batch's own test is what triggered the fallback,
-    `batch_test_failed=True`."""
-    result = _run_per_package(backend, git, runner, packages, test_command, directory, allow_major)
+    `batch_test_failed=True`.
+
+    Also tags an `UpdateAborted` raised *by* `_run_per_package` itself (a
+    re-sync failure partway through the fallback loop) - its carried
+    partial result is real, already-committed outcomes, and must not be
+    reported as if they came from a plain, untagged per-package run just
+    because the tagging loop below never got to run on them."""
+    try:
+        result = _run_per_package(
+            backend, git, runner, packages, test_command, directory, allow_major
+        )
+    except UpdateAborted as exc:
+        for outcome in exc.result.outcomes:
+            outcome.strategy = "batch-first"
+            if batch_test_failed:
+                outcome.batch_test_failed = True
+        raise
     for outcome in result.outcomes:
         outcome.strategy = "batch-first"
         if batch_test_failed:
@@ -540,6 +565,110 @@ def _finish_batch_first(
     return UpdateResult(outcomes=[outcomes_by_name[p] for p in packages if p in outcomes_by_name])
 
 
+def _replay_sequential(
+    backend: Backend,
+    git: GitRepo,
+    files: list[str],
+    old_versions: dict[str, str | None],
+    new_versions: dict[str, str | None],
+    changed_packages: list[str],
+) -> tuple[dict[str, PackageOutcome], bool]:
+    """Replays each of `changed_packages`' own update, committed on its
+    own, without testing in between (the sequential-replay half of
+    `_run_batch_first`'s happy path). Returns `(outcomes_by_name,
+    replay_step_failed)`:
+
+    - `outcomes_by_name` only ever covers `changed_packages` - the caller
+      fills in "skipped" outcomes for the rest.
+    - `replay_step_failed` is `True` when a replay step itself could not
+      be trusted (its own `update_package()` call failed, or it produced
+      neither a lock change nor landed on the batch's own target version
+      for that package) - the caller discards everything and falls back
+      in that case, never attempting the verification-test grace period:
+      unlike a *complete* replay simply landing on a different (but
+      internally consistent) lock than the batch did - which the caller
+      handles separately, by comparing `Backend.all_locked_versions()` -
+      this leaves nothing coherent left to verify.
+
+    Two corrections on top of the batch's own precomputed `new_versions`,
+    both because a resolver can behave differently resolving one package
+    alone (in the replay) than as part of the larger batch:
+
+    - a package's own commit message/outcome always use its version as
+      read fresh right after its own `update_package()` call, never the
+      batch's precomputed value, which can already be stale by the time
+      this package's own replay step actually runs (issue #23 review: a
+      commit claiming one version while the lock actually holds another);
+    - a package that produces no lock change of its own but is already
+      sitting at the batch's target version was pulled there as a side
+      effect of an *earlier* package's own update in this same replay - a
+      shared transitive dependency, most commonly (issue #23 review: e.g.
+      updating jsonschema alone already pulls in the attrs version the
+      batch wanted, so attrs's own replay step has nothing left to do).
+      That is not a failure: it is reported as `updated` anyway (old ->
+      the batch's target) with no separate commit of its own - the change
+      already lives in whichever package's commit `bundled_with` names
+      (`None` only if that is somehow the very first replay step, which
+      should not happen: the start state was just reset to, so the first
+      changed package cannot already be at its target).
+
+    After every changed package has been processed, every outcome's
+    `new_version` is refreshed once more straight from the lock, in case
+    a *later* package's own update further changed an *earlier*,
+    already-committed package's version - the already-written commit
+    message cannot be retroactively fixed, but the reported outcome
+    always reflects the true final state.
+    """
+    outcomes_by_name: dict[str, PackageOutcome] = {}
+    last_committed_package: str | None = None
+
+    for package in changed_packages:
+        update_result = backend.update_package(package)
+        print(update_result.stdout)
+        print(update_result.stderr)
+        if not update_result.ok:
+            return outcomes_by_name, True
+
+        if not git.diff_changed(files):
+            already_at_target = backend.locked_version(package) == new_versions[package]
+            if not already_at_target:
+                # A real mismatch: this package's own replay neither
+                # changed anything nor landed on what the batch achieved
+                # for it - nothing coherent left to verify.
+                return outcomes_by_name, True
+            outcomes_by_name[package] = PackageOutcome(
+                name=package,
+                status="updated",
+                old_version=old_versions[package],
+                new_version=new_versions[package],
+                strategy="batch-first",
+                tested_in_batch=True,
+                bundled_with=last_committed_package,
+            )
+            continue
+
+        actual_new_version = backend.locked_version(package)
+        git.stage(files)
+        git.commit(
+            f"Update {package} {_fmt_version(old_versions[package])} -> "
+            f"{_fmt_version(actual_new_version)}"
+        )
+        last_committed_package = package
+        outcomes_by_name[package] = PackageOutcome(
+            name=package,
+            status="updated",
+            old_version=old_versions[package],
+            new_version=actual_new_version,
+            strategy="batch-first",
+            tested_in_batch=True,
+        )
+
+    for package in changed_packages:
+        outcomes_by_name[package].new_version = backend.locked_version(package)
+
+    return outcomes_by_name, False
+
+
 def _run_batch_first(
     backend: Backend,
     git: GitRepo,
@@ -564,24 +693,31 @@ def _run_batch_first(
          runs total) - `batch_test_failed=True` on every outcome.
        - Passes -> reset to the start state again, then replay each
          changed package's own `update_package()` + commit, in sequence,
-         *without* testing in between, so the git history looks the same
-         as a per-package run would have produced. Once every package has
-         been replayed, its result is compared against the batch's own
-         lock (`Backend.all_locked_versions()`) - a resolver can be
+         *without* testing in between (see `_replay_sequential` for two
+         corrections this applies on top of the batch's own precomputed
+         versions - a package's commit/outcome always uses its version as
+         read fresh right after its own replay step, and a package
+         already pulled to its target by an *earlier* package's replay
+         step - e.g. a shared transitive dependency - needs no separate
+         commit of its own), so the git history looks the same as a
+         per-package run would have produced. Once every package has been
+         replayed, its result is compared against the batch's own lock
+         (`Backend.all_locked_versions()`) - a resolver can be
          order-sensitive for transitive dependencies, so a replayed
          package-by-package resolution is not guaranteed to reproduce the
          exact same lock the all-at-once batch update did.
          - Matches -> done; every replayed package is reported "updated"
            with `tested_in_batch=True` (validated by the batch's one test
            run, not its own).
-         - Diverges (or a replay step itself fails to change the lock) ->
-           one more test run, against the diverged sequential result.
-           Passes -> keep it (still `tested_in_batch=True` - validated by
-           this one verification run covering everything). Fails ->
-           hard-reset away every replay commit and fall back to the
-           ordinary per-package loop for every package instead (this path
-           never sets `batch_test_failed` - the batch's own test did pass;
-           it is the replay that could not be trusted).
+         - Diverges (or a replay step itself could not be trusted at all -
+           see `_replay_sequential`) -> one more test run, against the
+           diverged sequential result. Passes -> keep it (still
+           `tested_in_batch=True` - validated by this one verification run
+           covering everything). Fails -> hard-reset away every replay
+           commit and fall back to the ordinary per-package loop for every
+           package instead (this path never sets `batch_test_failed` - the
+           batch's own test did pass; it is the replay that could not be
+           trusted).
 
     A re-sync failure at any point aborts the whole run with whatever
     partial result exists at that point, exactly like the per-package
@@ -643,36 +779,9 @@ def _run_batch_first(
     abort_result = UpdateResult()
     _reset_and_resync(backend, git, files, "batch update", abort_result)
 
-    outcomes_by_name: dict[str, PackageOutcome] = {}
-    replay_step_failed = False
-    for package in changed_packages:
-        update_result = backend.update_package(package)
-        print(update_result.stdout)
-        print(update_result.stderr)
-        if not update_result.ok or not git.diff_changed(files):
-            # Should not normally happen - the batch update already proved
-            # this exact package resolves - but never trust a
-            # partially-applied replay: unlike a *complete* replay landing
-            # on a different (but internally consistent) lock than the
-            # batch did (handled below via one verification test), this
-            # leaves some packages never even attempted, so there is
-            # nothing coherent left to verify - discard immediately and
-            # fall back instead of guessing at outcomes for the rest.
-            replay_step_failed = True
-            break
-        new_version = new_versions[package]
-        git.stage(files)
-        git.commit(
-            f"Update {package} {_fmt_version(old_versions[package])} -> {_fmt_version(new_version)}"
-        )
-        outcomes_by_name[package] = PackageOutcome(
-            name=package,
-            status="updated",
-            old_version=old_versions[package],
-            new_version=new_version,
-            strategy="batch-first",
-            tested_in_batch=True,
-        )
+    outcomes_by_name, replay_step_failed = _replay_sequential(
+        backend, git, files, old_versions, new_versions, changed_packages
+    )
 
     if replay_step_failed:
         print(

@@ -879,6 +879,29 @@ def test_report_json_includes_batch_test_failed_field():
     assert "tested_in_batch" not in record
 
 
+def test_report_json_includes_bundled_with_field():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="b",
+                status="updated",
+                strategy="batch-first",
+                tested_in_batch=True,
+                bundled_with="a",
+            )
+        ]
+    )
+
+    (record,) = json.loads(report_json(result))
+
+    assert record["bundled_with"] == "a"
+
+
+def test_report_json_omits_bundled_with_when_not_set():
+    (record,) = json.loads(report_json(UpdateResult(outcomes=[_outcome(name="a")])))
+    assert "bundled_with" not in record
+
+
 def test_render_body_shows_batch_fallback_banner_when_batch_test_failed():
     result = UpdateResult(
         outcomes=[
