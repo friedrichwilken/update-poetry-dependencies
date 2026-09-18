@@ -101,15 +101,24 @@ def _table_section(
     return text
 
 
+def _bump_cell(o: PackageOutcome) -> str:
+    if not o.bump:
+        return "-"
+    return f"{o.bump} (raised)" if o.constraint_raised else o.bump
+
+
 def _updated_table(outcomes: list[PackageOutcome], budget: int) -> str:
     # The "bump" column is additive: it only appears at all once at least
-    # one outcome actually used it, so a run that never touches the
-    # major-bump feature (issue #21) renders byte-identically to before
-    # the feature existed.
+    # one outcome actually used it, so a run that never touches
+    # allow-major (issue #21) renders byte-identically to before the
+    # feature existed. `bump` reports the *actual* release segment that
+    # changed (major/minor/patch/other) - going beyond the declared
+    # constraint is not necessarily a semver-major jump - and
+    # "(raised)" marks the rows where the constraint itself was rewritten.
     if any(o.bump for o in outcomes):
         rows = [
             f"| {_cell(o.name)} | {_cell(o.old_version)} | {_cell(o.new_version)} | "
-            f"{_cell(o.bump or 'in-range')} |"
+            f"{_cell(_bump_cell(o))} |"
             for o in outcomes
         ]
         return _table_section(
@@ -152,29 +161,31 @@ def _failed_table(outcomes: list[PackageOutcome], budget: int) -> str:
 def _held_back_table(outcomes: list[PackageOutcome], budget: int) -> str:
     rows = []
     for o in outcomes:
-        reason = _REASON_LABELS.get(o.major_failure_kind, o.major_failure_kind or "failed")
+        reason = _REASON_LABELS.get(
+            o.beyond_constraint_failure_kind, o.beyond_constraint_failure_kind or "failed"
+        )
         rows.append(
-            f"| {_cell(o.name)} | {_cell(o.old_version)} | {_cell(o.major_attempted_version)} | "
-            f"{_cell(reason)} |"
+            f"| {_cell(o.name)} | {_cell(o.old_version)} | "
+            f"{_cell(o.beyond_constraint_version)} | {_cell(reason)} |"
         )
     return _table_section(
-        "## ⚠️ Major update held back",
+        "## ⚠️ Held back (update beyond declared constraint failed)",
         ["| package | current | attempted | reason |", "| --- | --- | --- | --- |"],
         rows,
         budget,
-        "held-back major update(s)",
+        "held-back update(s)",
     )
 
 
-def _major_skip_reasons_line(outcomes: list[PackageOutcome], budget: int) -> str:
+def _beyond_constraint_skip_reasons_line(outcomes: list[PackageOutcome], budget: int) -> str:
     """A compact, one-line-per-run note of packages where `allow-major` is
     enabled but no attempt could be made at all (unsupported declaration
     shape) - deliberately never shown in the PR body (only ever rendered
     when `include_major_skip_notes` is set, i.e. for the job summary): the
     full reasons already live in `report-json`, and the PR body has
     limited room better spent on things a reviewer needs to act on."""
-    heading = "## ℹ️ Major bump skipped\n\n"
-    items = [f"{_cell(o.name)} ({_cell(o.major_skip_reason)})" for o in outcomes]
+    heading = "## ℹ️ Update beyond constraint skipped\n\n"
+    items = [f"{_cell(o.name)} ({_cell(o.beyond_constraint_skip_reason)})" for o in outcomes]
     full = ", ".join(items)
     if len(heading) + len(full) + 1 <= budget:
         return heading + full + "\n"
@@ -249,8 +260,8 @@ def _budgeted_details(
     characters, in order; anything that would not fit is dropped and named
     in a trailing note instead of being silently lost. `entries` is a list
     of (name, output_tail) pairs - kept generic (rather than
-    `PackageOutcome`) so both the "Failed" and "Major update held back"
-    sections can reuse it against their own output field."""
+    `PackageOutcome`) so both the "Failed" and "Held back" sections can
+    reuse it against their own output field."""
     if not entries:
         return ""
     if budget <= 0:
@@ -293,19 +304,20 @@ def render_body(
     aborted_reason: str | None = None,
     include_major_skip_notes: bool = False,
 ) -> str:
-    """`include_major_skip_notes` adds a compact "packages where a major
-    bump was skipped" line (issue #21) - deliberately opt-in and left off
-    for the PR body (see `_major_skip_reasons_line`), and turned on by the
-    caller only for the job summary. All of the major-bump sections below
-    are additive: with `allow_major` disabled (or simply no held-back/
-    skipped-major outcomes), none of `held_back`/`major_skipped` is
+    """`include_major_skip_notes` adds a compact "packages where an update
+    beyond the declared constraint was skipped" line (issue #21) -
+    deliberately opt-in and left off for the PR body (see
+    `_beyond_constraint_skip_reasons_line`), and turned on by the caller
+    only for the job summary. All of the allow-major sections below are
+    additive: with `allow_major` disabled (or simply no held-back/skipped
+    outcomes), neither `held_back` nor `beyond_constraint_skipped` is
     non-empty, so this renders byte-identically to before the feature
     existed."""
     updated = [o for o in result.outcomes if o.status == "updated"]
     failed = [o for o in result.outcomes if o.status == "failed"]
     skipped = [o for o in result.outcomes if o.status == "skipped"]
-    held_back = [o for o in result.outcomes if o.held_back_major]
-    major_skipped = [o for o in result.outcomes if o.major_skip_reason]
+    held_back = [o for o in result.outcomes if o.held_back_beyond_constraint]
+    beyond_constraint_skipped = [o for o in result.outcomes if o.beyond_constraint_skip_reason]
 
     banner = f"⚠️ **Run aborted:** {aborted_reason}\n\n" if aborted_reason else ""
     header = f"{banner}Workflow run: {run_url}"
@@ -333,8 +345,8 @@ def render_body(
         section = _held_back_table(held_back, remaining)
         parts.append(section)
         remaining = max(remaining - len(section) - 2, 0)
-    if major_skipped and include_major_skip_notes:
-        section = _major_skip_reasons_line(major_skipped, remaining)
+    if beyond_constraint_skipped and include_major_skip_notes:
+        section = _beyond_constraint_skip_reasons_line(beyond_constraint_skipped, remaining)
         parts.append(section)
         remaining = max(remaining - len(section) - 2, 0)
 
@@ -351,9 +363,9 @@ def render_body(
     if held_back:
         budget = max_chars - len(body)
         details = _budgeted_details(
-            [(o.name, o.major_output_tail) for o in held_back],
+            [(o.name, o.beyond_constraint_output_tail) for o in held_back],
             budget,
-            "held-back major update(s)",
+            "held-back update(s)",
         )
         if details:
             body += "\n" + details
@@ -363,10 +375,11 @@ def render_body(
 
 def _outcome_to_dict(o: PackageOutcome, drop_output: bool = False) -> dict:
     """Additive-only: the six original fields keep their exact names and
-    meaning, and every field issue #21 added (`bump`, `major_*`) is only
-    ever present in the dict when it actually has something to say - a run
-    with `allow_major` disabled never sets any of them, so its
-    `report-json` is byte-identical to before the feature existed."""
+    meaning, and every field issue #21 added (`bump`, `constraint_raised`,
+    `beyond_constraint_*`) is only ever present in the dict when it
+    actually has something to say - a run with `allow_major` disabled
+    never sets any of them, so its `report-json` is byte-identical to
+    before the feature existed."""
     record = {
         "name": o.name,
         "status": o.status,
@@ -379,21 +392,25 @@ def _outcome_to_dict(o: PackageOutcome, drop_output: bool = False) -> dict:
         record["output_truncated"] = True
     if o.bump:
         record["bump"] = o.bump
-    if o.major_attempted_version is not None:
-        record["major_attempted_version"] = o.major_attempted_version
-    if o.major_failure_kind is not None:
-        record["major_failure_kind"] = o.major_failure_kind
-    if o.major_output_tail:
-        record["major_output_tail"] = "" if drop_output else o.major_output_tail
+    if o.constraint_raised:
+        record["constraint_raised"] = True
+    if o.beyond_constraint_version is not None:
+        record["beyond_constraint_version"] = o.beyond_constraint_version
+    if o.beyond_constraint_failure_kind is not None:
+        record["beyond_constraint_failure_kind"] = o.beyond_constraint_failure_kind
+    if o.beyond_constraint_output_tail:
+        record["beyond_constraint_output_tail"] = (
+            "" if drop_output else o.beyond_constraint_output_tail
+        )
         if drop_output:
-            record["major_output_truncated"] = True
-    if o.major_skip_reason:
-        record["major_skip_reason"] = o.major_skip_reason
+            record["beyond_constraint_output_truncated"] = True
+    if o.beyond_constraint_skip_reason:
+        record["beyond_constraint_skip_reason"] = o.beyond_constraint_skip_reason
     return record
 
 
 def _output_size(o: PackageOutcome) -> int:
-    return len(o.output_tail) + len(o.major_output_tail)
+    return len(o.output_tail) + len(o.beyond_constraint_output_tail)
 
 
 def report_json(result: UpdateResult, max_bytes: int = MAX_REPORT_JSON_BYTES) -> str:
@@ -405,9 +422,9 @@ def report_json(result: UpdateResult, max_bytes: int = MAX_REPORT_JSON_BYTES) ->
 
     Every package always gets a record - if the serialized array would
     exceed `max_bytes`, the captured-output fields (`output_tail` and, for
-    a held-back major bump, `major_output_tail` - the only fields that can
-    be large) are dropped together, largest first, from as many records as
-    it takes to fit, rather than truncating the array itself.
+    a held-back update, `beyond_constraint_output_tail` - the only fields
+    that can be large) are dropped together, largest first, from as many
+    records as it takes to fit, rather than truncating the array itself.
     """
     records = [_outcome_to_dict(o) for o in result.outcomes]
     text = json.dumps(records)

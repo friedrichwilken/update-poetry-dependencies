@@ -6,6 +6,7 @@ from typing import Literal
 from .backend import Backend
 from .errors import UpdateAborted
 from .git_repo import GitRepo
+from .pep440 import bump_kind as _bump_kind
 from .runner import CommandRunner
 from .textcap import capture_tail
 
@@ -14,7 +15,7 @@ from .textcap import capture_tail
 # the call site.
 Status = Literal["updated", "failed", "skipped"]
 FailureKind = Literal["resolution", "test"] | None
-Bump = Literal["major"] | None
+Bump = Literal["major", "minor", "patch", "other"] | None
 
 
 @dataclass
@@ -29,23 +30,38 @@ class PackageOutcome:
     relevant to `failure_kind` (resolver output for "resolution", test
     command output for "test").
 
-    The `bump`/`major_*` fields are additive, only ever set when
-    `allow-major` is enabled (issue #21), and otherwise stay at their
-    default (falsy) values - `report.py` relies on that to keep
-    `report-json`'s shape byte-identical to before the feature existed
-    when it is not in use:
+    The `bump`/`constraint_raised`/`beyond_constraint_*` fields are
+    additive, only ever set when `allow-major` is enabled (issue #21), and
+    otherwise stay at their default (falsy) values - `report.py` relies on
+    that to keep `report-json`'s shape byte-identical to before the
+    feature existed when it is not in use:
 
-    - `bump` is `"major"` when this outcome's own update *is* a major
-      bump (`status` is "updated", `new_version` is the major release).
-    - `major_attempted_version`/`major_failure_kind`/`major_output_tail`
-      are set when a major bump was attempted but held back (resolution
-      or test failure), regardless of what `status` ended up being for
+    - `bump` is the actual release segment that changed between
+      `old_version` and `new_version` for *any* "updated" outcome while
+      `allow-major` is enabled (not just one that raised the constraint) -
+      `"major"`, `"minor"`, `"patch"`, or `"other"` (see
+      `pep440.bump_kind`). An update beyond the declared constraint is not
+      necessarily a semver-major bump (`six >=1.10,<1.15` allowing
+      `1.17.0` is a minor bump that merely exceeded the declared range),
+      so this is never assumed - it is always computed from the actual
+      version numbers.
+    - `constraint_raised` is `True` exactly when this outcome's own commit
+      raised the declared constraint itself (as opposed to a plain
+      in-range update, which never touches the manifest).
+    - `beyond_constraint_version`/`beyond_constraint_failure_kind`/
+      `beyond_constraint_output_tail` are set when an attempt to go beyond
+      the declared constraint was made but held back (resolution or test
+      failure, or discarded - see `major.MajorAttempt` - both surface here
+      as `failure_kind`), regardless of what `status` ended up being for
       the (possibly still successful) in-range update alongside it.
-    - `major_skip_reason` is set when `allow-major` is enabled but no
-      major attempt could be made at all, for a package whose declared
-      constraint has an upper bound but whose declaration shape is not
-      one this feature can safely rewrite (git/path/url source, an
-      environment marker, an exact pin, ...).
+    - `beyond_constraint_skip_reason` is set when `allow-major` is enabled
+      but no attempt could be made at all, for a package whose declared
+      constraint has an upper bound but whose declaration shape is not one
+      this feature can safely rewrite (git/path/url source, an
+      environment marker, an exact pin, ...), or whose attempt succeeded
+      but had to be discarded (changed more than the version constraint,
+      or landed on an unwanted pre-release) - reported this way rather
+      than as a failure_kind, since the tool itself did not fail.
     """
 
     name: str
@@ -55,14 +71,18 @@ class PackageOutcome:
     failure_kind: FailureKind = None
     output_tail: str = ""
     bump: Bump = None
-    major_attempted_version: str | None = None
-    major_failure_kind: FailureKind = None
-    major_output_tail: str = ""
-    major_skip_reason: str | None = None
+    constraint_raised: bool = False
+    beyond_constraint_version: str | None = None
+    beyond_constraint_failure_kind: FailureKind = None
+    beyond_constraint_output_tail: str = ""
+    beyond_constraint_skip_reason: str | None = None
 
     @property
-    def held_back_major(self) -> bool:
-        return self.major_attempted_version is not None or self.major_failure_kind is not None
+    def held_back_beyond_constraint(self) -> bool:
+        return (
+            self.beyond_constraint_version is not None
+            or self.beyond_constraint_failure_kind is not None
+        )
 
 
 @dataclass
@@ -86,7 +106,7 @@ class UpdateResult:
 
     @property
     def held_back(self) -> list[str]:
-        return [o.name for o in self.outcomes if o.held_back_major]
+        return [o.name for o in self.outcomes if o.held_back_beyond_constraint]
 
 
 def _fmt_version(version: str | None) -> str:
@@ -187,7 +207,43 @@ def _in_range_update(
     return outcome, True
 
 
-def _attempt_major(
+def _reset_beyond_constraint_or_abort_with_outcome(
+    backend: Backend,
+    git: GitRepo,
+    beyond_files: list[str],
+    package: str,
+    result: UpdateResult,
+    old_version: str | None,
+    attempted_version: str | None,
+    failure_kind: str,
+    output_tail: str,
+) -> None:
+    """Reset+resync the beyond-constraint attempt's files. The plain
+    in-range failure paths already append their outcome to
+    `result.outcomes` *before* resetting, so an abort there never drops
+    the package it happened on - but at this point in the
+    beyond-constraint flow no outcome for `package` exists yet (it is
+    normally attached to whatever the in-range fallback produces
+    afterwards). If the reset itself aborts the run, record a `failed`
+    outcome for `package` first so the partial result does not silently
+    drop it."""
+    try:
+        _reset_and_resync(backend, git, beyond_files, package, result)
+    except UpdateAborted as exc:
+        result.outcomes.append(
+            PackageOutcome(
+                name=package,
+                status="failed",
+                old_version=old_version,
+                new_version=attempted_version,
+                failure_kind=failure_kind,
+                output_tail=capture_tail(f"{output_tail}\n{exc}"),
+            )
+        )
+        raise
+
+
+def _attempt_beyond_constraint(
     backend: Backend,
     git: GitRepo,
     runner: CommandRunner,
@@ -197,48 +253,66 @@ def _attempt_major(
     old_version: str | None,
     result: UpdateResult,
 ) -> tuple[PackageOutcome | None, tuple[str | None, str, str] | None, str | None]:
-    """Try to raise `package` to its latest release (issue #21). Returns a
-    3-tuple:
+    """Try to raise `package`'s declared constraint beyond its current
+    upper bound (issue #21). Returns a 3-tuple:
 
-    - a finished `PackageOutcome` if the major bump itself passed and was
+    - a finished `PackageOutcome` if the attempt itself passed and was
       committed (the caller should record it and move on to the next
       package without an in-range update at all);
     - else, a `(attempted_version, failure_kind, output_tail)` "held back"
-      tuple if an attempt was made but failed (resolution or test) - the
-      manifest/lock have already been reset+resynced, and the caller
+      tuple if an attempt was made but failed, or had to be discarded -
+      the manifest/lock have already been reset+resynced, and the caller
       should still run the plain in-range update and attach this to
       whatever outcome that produces;
     - else, a skip reason string if `allow-major` is enabled but no
-      attempt could be made for this package at all (or None if none of
-      the above apply - no major attempt was needed in the first place).
+      attempt could be made for this package at all, or its
+      otherwise-successful attempt had to be discarded (or None if none
+      of the above apply - no attempt was needed in the first place).
     """
-    major = backend.try_major(package)
-    if major is None:
+    attempt = backend.try_major(package)
+    if attempt is None:
         return None, None, None
-    if major.skip_reason is not None:
-        return None, None, major.skip_reason
+    if attempt.skip_reason is not None:
+        return None, None, attempt.skip_reason
 
-    resolve_result = major.resolve_result
+    resolve_result = attempt.resolve_result
     print(resolve_result.stdout)
     print(resolve_result.stderr)
-    major_files = backend.major_files_to_stage()
+    beyond_files = backend.major_files_to_stage()
+
+    if attempt.discarded_reason is not None:
+        attempted_version = backend.locked_version(package)
+        print(f"beyond-constraint update for {package} discarded: {attempt.discarded_reason}")
+        _reset_beyond_constraint_or_abort_with_outcome(
+            backend,
+            git,
+            beyond_files,
+            package,
+            result,
+            old_version,
+            attempted_version,
+            "resolution",
+            capture_tail(resolve_result.stdout + "\n" + resolve_result.stderr),
+        )
+        return None, None, attempt.discarded_reason
 
     if resolve_result.ok:
         attempted_version = backend.locked_version(package)
         test_result, test_passed = _run_test_command(runner, test_command, directory, package)
         if test_passed:
-            print(f"major update for {package} passed")
-            git.stage(major_files)
+            print(f"beyond-constraint update for {package} passed")
+            git.stage(beyond_files)
             git.commit(
                 f"Update {package} {_fmt_version(old_version)} -> "
-                f"{_fmt_version(attempted_version)} (major)"
+                f"{_fmt_version(attempted_version)} (constraint raised)"
             )
             outcome = PackageOutcome(
                 name=package,
                 status="updated",
                 old_version=old_version,
                 new_version=attempted_version,
-                bump="major",
+                bump=_bump_kind(old_version, attempted_version),
+                constraint_raised=True,
             )
             return outcome, None, None
         held_back = (
@@ -254,8 +328,10 @@ def _attempt_major(
             capture_tail(resolve_result.stdout + "\n" + resolve_result.stderr),
         )
 
-    print(f"major update for {package} held back, falling back to the in-range update")
-    _reset_and_resync(backend, git, major_files, package, result)
+    print(f"beyond-constraint update for {package} held back, falling back to the in-range update")
+    _reset_beyond_constraint_or_abort_with_outcome(
+        backend, git, beyond_files, package, result, old_version, *held_back
+    )
     return None, held_back, None
 
 
@@ -278,16 +354,20 @@ def run_updates(
     - passed if the lock file changed and the test command succeeded (or no
       test command was given); the lock file is committed
 
-    When `allow_major` is true (issue #21), each package is first offered a
-    major-bump attempt (`Backend.try_major`): raise its declared constraint
-    so the latest release is allowed, re-lock just that package, and test
-    it exactly like an in-range update. A passing attempt is committed on
-    its own (tagged `bump="major"`) and the package is done - no separate
-    in-range update runs for it. A failing attempt (resolution or test) is
-    reset and reported as "held back" on whatever outcome the ordinary
-    in-range update produces instead, which still runs normally. When
-    `allow_major` is false, `pyproject.toml` is never read or touched by
-    this loop at all.
+    When `allow_major` is true (issue #21), each package is first offered
+    an attempt to go beyond its declared constraint (`Backend.try_major`):
+    raise it so the latest release is allowed, re-lock just that package,
+    and test it exactly like an in-range update. A passing attempt is
+    committed on its own (`constraint_raised=True`, `bump` set to whatever
+    release segment actually changed - not necessarily "major") and the
+    package is done - no separate in-range update runs for it. A failing
+    attempt (resolution or test, or one that had to be discarded) is reset
+    and reported as "held back" on whatever outcome the ordinary in-range
+    update produces instead, which still runs normally; when that in-range
+    outcome is itself "updated", it also gets its own `bump` computed, so
+    every "updated" outcome in an `allow_major` run reports a truthful
+    `bump` regardless of which path produced it. When `allow_major` is
+    false, `pyproject.toml` is never read or touched by this loop at all.
     """
     result = UpdateResult()
     files = backend.files_to_stage()
@@ -297,13 +377,13 @@ def run_updates(
         old_version = backend.locked_version(package)
 
         held_back = None
-        major_skip_reason = None
+        beyond_constraint_skip_reason = None
         if allow_major:
-            major_outcome, held_back, major_skip_reason = _attempt_major(
+            beyond_outcome, held_back, beyond_constraint_skip_reason = _attempt_beyond_constraint(
                 backend, git, runner, package, test_command, directory, old_version, result
             )
-            if major_outcome is not None:
-                result.outcomes.append(major_outcome)
+            if beyond_outcome is not None:
+                result.outcomes.append(beyond_outcome)
                 print("::endgroup::")
                 continue
 
@@ -312,12 +392,14 @@ def run_updates(
         )
         if held_back is not None:
             (
-                outcome.major_attempted_version,
-                outcome.major_failure_kind,
-                outcome.major_output_tail,
+                outcome.beyond_constraint_version,
+                outcome.beyond_constraint_failure_kind,
+                outcome.beyond_constraint_output_tail,
             ) = held_back
-        if major_skip_reason is not None:
-            outcome.major_skip_reason = major_skip_reason
+        if beyond_constraint_skip_reason is not None:
+            outcome.beyond_constraint_skip_reason = beyond_constraint_skip_reason
+        if allow_major and outcome.status == "updated":
+            outcome.bump = _bump_kind(outcome.old_version, outcome.new_version)
         result.outcomes.append(outcome)
         if needs_reset:
             _reset_and_resync(backend, git, files, package, result)

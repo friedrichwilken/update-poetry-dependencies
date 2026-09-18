@@ -29,6 +29,17 @@ class GitRepo:
         result = self.runner.run(["git", "diff", "--quiet", "--"] + paths, cwd=self.directory)
         return result.returncode != 0
 
+    def has_uncommitted_changes(self, paths: list[str]) -> bool:
+        """True if any of `paths` differ from HEAD in either the working
+        tree or the index (staged or unstaged) - unlike `diff_changed`
+        (working tree vs. index only), this also catches changes that are
+        already staged but not committed. Used to fail fast before this
+        action's own update loop would otherwise either destroy a caller's
+        uncommitted edit to the manifest/lock file (`reset_files` discards
+        it) or silently sweep it into one of this run's own commits."""
+        result = self.runner.run(["git", "status", "--porcelain", "--"] + paths, cwd=self.directory)
+        return bool(result.stdout.strip())
+
     def reset_files(self, paths: list[str]) -> None:
         """Discard uncommitted changes to `paths` only (tracked files, never
         touches anything untracked such as a .venv)."""

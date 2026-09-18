@@ -103,16 +103,19 @@ class FakeGit:
         diff_results: list | None = None,
         head_shas: list | None = None,
         current_branch: str = "main",
+        uncommitted: bool = False,
     ):
         self._diff_results = list(diff_results or [])
         self._head_shas = list(head_shas or ["sha0"])
         self._current_branch = current_branch
+        self._uncommitted = uncommitted
         self.reset_calls: list[list[str]] = []
         self.staged_calls: list[list[str]] = []
         self.commit_messages: list[str] = []
         self.checkout_branches: list[str] = []
         self.push_branches: list[str] = []
         self.configured = False
+        self.has_uncommitted_changes_calls: list[list[str]] = []
 
     def configure_user(self, name: str, email: str) -> None:
         self.configured = True
@@ -127,6 +130,10 @@ class FakeGit:
 
     def diff_changed(self, paths: list[str]) -> bool:
         return self._diff_results.pop(0)
+
+    def has_uncommitted_changes(self, paths: list[str]) -> bool:
+        self.has_uncommitted_changes_calls.append(list(paths))
+        return self._uncommitted
 
     def reset_files(self, paths: list[str]) -> None:
         self.reset_calls.append(list(paths))

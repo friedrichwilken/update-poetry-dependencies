@@ -12,10 +12,12 @@ block:
   fails its test, six updates cleanly - see those fixtures' `check.py`
   for why.
 - "major" (`tests/fixture/poetry-major`/`tests/fixture/uv-major`, run
-  with `allow-major: 'true'`): zipp's major bump passes and is committed
-  with `bump: "major"`; charset-normalizer's major bump fails the test
-  command and is held back, falling back to a passing in-range update -
-  see those fixtures' `check.py` for why.
+  with `allow-major: 'true'`): zipp's update beyond its declared
+  constraint passes and is committed with `bump: "major"` and
+  `constraint_raised: true`; charset-normalizer's equivalent attempt
+  fails the test command and is held back, falling back to a passing
+  in-range update (`bump: "minor"`, `constraint_raised` absent) - see
+  those fixtures' `check.py` for why.
 """
 
 from __future__ import annotations
@@ -57,6 +59,10 @@ def check_major(by_name: dict, check) -> None:
     zipp = by_name.get("zipp", {})
     check(zipp.get("status") == "updated", f"zipp status: {zipp.get('status')!r}")
     check(zipp.get("bump") == "major", f"zipp bump: {zipp.get('bump')!r}")
+    check(
+        zipp.get("constraint_raised") is True,
+        f"zipp constraint_raised: {zipp.get('constraint_raised')!r}",
+    )
     check(bool(zipp.get("old_version")), "zipp old_version should be non-empty")
     check(bool(zipp.get("new_version")), "zipp new_version should be non-empty")
     check(
@@ -64,8 +70,8 @@ def check_major(by_name: dict, check) -> None:
         f"zipp old_version == new_version: {zipp.get('old_version')!r}",
     )
     check(
-        zipp.get("major_attempted_version") is None,
-        "zipp should have no held-back major attempt - its own bump *is* the major one",
+        zipp.get("beyond_constraint_version") is None,
+        "zipp should have no held-back attempt - its own update *is* the one beyond the constraint",
     )
 
     cn = by_name.get("charset-normalizer", {})
@@ -74,17 +80,25 @@ def check_major(by_name: dict, check) -> None:
         cn.get("failure_kind") is None,
         f"charset-normalizer failure_kind: {cn.get('failure_kind')!r}",
     )
-    check("bump" not in cn, "charset-normalizer's own update should not be tagged as a major bump")
     check(
-        bool(cn.get("major_attempted_version")),
-        "charset-normalizer should report a held-back major_attempted_version",
+        "constraint_raised" not in cn,
+        "charset-normalizer's own update is the in-range fallback, not a raised constraint",
     )
     check(
-        cn.get("major_failure_kind") == "test",
-        f"charset-normalizer major_failure_kind: {cn.get('major_failure_kind')!r}",
+        cn.get("bump") == "minor",
+        f"charset-normalizer bump (its own in-range fallback update): {cn.get('bump')!r}",
     )
     check(
-        bool(cn.get("major_output_tail")),
+        bool(cn.get("beyond_constraint_version")),
+        "charset-normalizer should report a held-back beyond_constraint_version",
+    )
+    beyond_kind = cn.get("beyond_constraint_failure_kind")
+    check(
+        beyond_kind == "test",
+        f"charset-normalizer beyond_constraint_failure_kind: {beyond_kind!r}",
+    )
+    check(
+        bool(cn.get("beyond_constraint_output_tail")),
         "charset-normalizer should carry the held-back attempt's captured output",
     )
     check(

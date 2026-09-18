@@ -29,10 +29,23 @@ class MajorAttempt:
       never as PR-body noise.
     - `skip_reason` is `None`: an attempt was actually made - the manifest
       and lock file were rewritten to raise the constraint and re-resolve.
-      `resolve_result.ok` says whether that succeeded; either way it is
-      `updater.run_updates`'s job to test/commit on success or reset and
-      fall back to the plain in-range update on failure.
+      `resolve_result` carries that attempt's combined output either way.
+      - `discarded_reason` set: the tool itself succeeded, but the result
+        cannot be trusted/kept - either it changed more than the version
+        constraint (the before/after manifest diff guard), or it landed on
+        a pre-release the original constraint's own version was not
+        already on. The files it touched still need resetting, but this is
+        reported the same way as a `skip_reason` (`beyond_constraint_skip_reason`),
+        never as a resolution failure - the tool did not fail, this
+        decided not to trust what it did.
+      - `discarded_reason` is `None` and `resolve_result.ok` is `False`:
+        a real resolution failure.
+      - `discarded_reason` is `None` and `resolve_result.ok` is `True`: a
+        genuine, trustworthy attempt - it is `updater.run_updates`'s job to
+        test/commit on success or reset and fall back to the plain
+        in-range update on a test failure.
     """
 
     skip_reason: str | None = None
     resolve_result: CommandResult | None = None
+    discarded_reason: str | None = None

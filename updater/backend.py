@@ -15,21 +15,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from .constraints import (
+    all_clauses_parseable,
     pep508_has_upper_bound,
     pep508_is_exact_pin,
     pep508_parse_specifiers,
     pep508_strip_upper_bound,
-    poetry_has_upper_bound,
-    poetry_is_exact_pin,
-    poetry_parse_constraint,
+    poetry_classify_constraint,
 )
 from .errors import ActionError
 from .lockfile import locked_version as _locked_version
 from .major import MajorAttempt
+from .pep440 import is_prerelease
 from .poetry_manifest import (
     constraint_text,
     extras_of,
+    find_extra_for_optional,
     find_poetry_table_declaration,
+    is_optional,
     normalized_extra_fields,
     unsupported_key,
 )
@@ -49,6 +51,18 @@ if TYPE_CHECKING:
 POETRY_LOCK_FILE = "poetry.lock"
 UV_LOCK_FILE = "uv.lock"
 PYPROJECT_FILE = "pyproject.toml"
+
+
+def _lands_on_new_prerelease(before_version: str | None, after_version: str | None) -> bool:
+    """True if `after_version` is a pre-release but `before_version` was
+    not. `poetry add pkg@latest` / `uv add ... --upgrade-package` are
+    both expected to already exclude pre-releases by default, but a
+    beyond-constraint attempt must never rely on that silently - this is
+    the guarantee living in this action's own code. A comma-joined
+    multi-version `locked_version()` result (see `lockfile.py`) never
+    parses as a single PEP 440 version, so this conservatively treats it
+    as "not a pre-release" rather than guessing."""
+    return is_prerelease(after_version or "") and not is_prerelease(before_version or "")
 
 
 class Backend(Protocol):
@@ -134,19 +148,27 @@ class PoetryBackend:
         if plan is None or isinstance(plan, str):
             return None if plan is None else MajorAttempt(skip_reason=plan)
 
+        before_version = self.locked_version(package)
+
         args = ["poetry", "add", plan.requirement, "-n", *plan.extra_args]
         result = self.runner.run(args, cwd=self.directory)
 
-        if result.ok:
-            after_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-            if not _poetry_only_version_changed(before_data, after_data, plan):
-                result = CommandResult(
-                    result.args,
-                    1,
-                    result.stdout,
-                    result.stderr
-                    + "\n(discarded: `poetry add` changed more than the version constraint)",
-                )
+        if not result.ok:
+            return MajorAttempt(resolve_result=result)
+
+        after_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        if not _poetry_only_version_changed(before_data, after_data, plan):
+            return MajorAttempt(
+                resolve_result=result,
+                discarded_reason="manifest changed beyond the version constraint",
+            )
+
+        after_version = self.locked_version(package)
+        if _lands_on_new_prerelease(before_version, after_version):
+            return MajorAttempt(
+                resolve_result=result,
+                discarded_reason="attempted version is a pre-release",
+            )
 
         return MajorAttempt(resolve_result=result)
 
@@ -216,23 +238,32 @@ def _plan_poetry_major(data: dict, package: str) -> _PoetryMajorPlan | str | Non
         raw_constraint = constraint_text(table_decl.value)
         if raw_constraint is None:
             return "no version constraint to raise"
-        clauses = poetry_parse_constraint(raw_constraint)
-        if clauses is None:
-            return "unparsable version constraint"
-        if poetry_is_exact_pin(clauses):
-            return "exact version pin"
-        if not poetry_has_upper_bound(clauses):
+        needed, reason = poetry_classify_constraint(raw_constraint)
+        if reason is not None:
+            return reason
+        if not needed:
             return None
-
-        extras = extras_of(table_decl.value)
-        extras_part = f"[{','.join(extras)}]" if extras else ""
-        requirement = f"{table_decl.name}{extras_part}@latest"
 
         extra_args = []
         if table_decl.table == "tool.poetry.group.dependencies":
             extra_args += ["--group", table_decl.group]
         elif table_decl.table == "tool.poetry.dev-dependencies":
             extra_args += ["--group", "dev"]
+
+        # `poetry add` drops an existing `optional = true` unless told
+        # which extra it belongs to (verified against poetry==2.4.3: the
+        # entry loses its `optional` key entirely otherwise, which the
+        # before/after diff guard below would then correctly - but
+        # wastefully - discard on every single run).
+        if is_optional(table_decl.value):
+            extra = find_extra_for_optional(data, table_decl.name)
+            if extra is None:
+                return "optional dependency not listed in any [tool.poetry.extras] entry"
+            extra_args += ["--optional", extra]
+
+        extras = extras_of(table_decl.value)
+        extras_part = f"[{','.join(extras)}]" if extras else ""
+        requirement = f"{table_decl.name}{extras_part}@latest"
 
         return _PoetryMajorPlan(
             requirement,
@@ -254,6 +285,8 @@ def _plan_poetry_major(data: dict, package: str) -> _PoetryMajorPlan | str | Non
 
         clauses = pep508_parse_specifiers(parsed.specifier_text)
         if clauses is None:
+            return "unparsable version specifier"
+        if not all_clauses_parseable(clauses):
             return "unparsable version specifier"
         if pep508_is_exact_pin(clauses):
             return "exact version pin"
@@ -324,6 +357,10 @@ class UvBackend:
         self.directory = directory
         self.python_version = python_version
         self.uv_sync_args = uv_sync_args
+        # sync() (and therefore _selection_args()) runs once per package in
+        # the update loop; without this, a project with tool.uv.conflicts
+        # would print the same ::warning:: dozens of times over one run.
+        self._conflicts_warned = False
 
     def lock_file_path(self) -> Path:
         return Path(self.directory) / UV_LOCK_FILE
@@ -367,10 +404,14 @@ class UvBackend:
         clauses = pep508_parse_specifiers(parsed.specifier_text)
         if clauses is None:
             return MajorAttempt(skip_reason="unparsable version specifier")
+        if not all_clauses_parseable(clauses):
+            return MajorAttempt(skip_reason="unparsable version specifier")
         if pep508_is_exact_pin(clauses):
             return MajorAttempt(skip_reason="exact version pin")
         if not pep508_has_upper_bound(clauses):
             return None
+
+        before_version = self.locked_version(package)
 
         new_spec = pep508_strip_upper_bound(clauses)
         extras_part = f"[{','.join(parsed.extras)}]" if parsed.extras else ""
@@ -408,13 +449,8 @@ class UvBackend:
         )
         if not same_shape:
             return MajorAttempt(
-                resolve_result=CommandResult(
-                    add_result.args,
-                    1,
-                    add_result.stdout,
-                    add_result.stderr
-                    + "\n(discarded: `uv add` changed more than the version specifier)",
-                )
+                resolve_result=add_result,
+                discarded_reason="manifest changed beyond the version constraint",
             )
 
         sync_result = self.sync()
@@ -424,6 +460,16 @@ class UvBackend:
             add_result.stdout + "\n" + sync_result.stdout,
             add_result.stderr + "\n" + sync_result.stderr,
         )
+        if not combined.ok:
+            return MajorAttempt(resolve_result=combined)
+
+        after_version = self.locked_version(package)
+        if _lands_on_new_prerelease(before_version, after_version):
+            return MajorAttempt(
+                resolve_result=combined,
+                discarded_reason="attempted version is a pre-release",
+            )
+
         return MajorAttempt(resolve_result=combined)
 
     def _selection_args(self) -> list[str]:
@@ -447,15 +493,17 @@ class UvBackend:
 
         pyproject_path = self._pyproject_path()
         if pyproject_path.is_file() and has_uv_conflicts(pyproject_path):
-            print(
-                "::warning::tool.uv.conflicts detected in "
-                f"{pyproject_path}: some extras/groups are declared "
-                "mutually exclusive, so `uv sync --all-groups "
-                "--all-extras` would fail. Falling back to `uv sync` with "
-                "no extras and only the default dependency groups. Set "
-                "the uv-sync-args input to select what to install, e.g. "
-                "'--extra cpu --group dev'."
-            )
+            if not self._conflicts_warned:
+                print(
+                    "::warning::tool.uv.conflicts detected in "
+                    f"{pyproject_path}: some extras/groups are declared "
+                    "mutually exclusive, so `uv sync --all-groups "
+                    "--all-extras` would fail. Falling back to `uv sync` with "
+                    "no extras and only the default dependency groups. Set "
+                    "the uv-sync-args input to select what to install, e.g. "
+                    "'--extra cpu --group dev'."
+                )
+                self._conflicts_warned = True
             return []
 
         return ["--all-groups", "--all-extras"]

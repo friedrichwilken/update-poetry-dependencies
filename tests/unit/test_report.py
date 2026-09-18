@@ -558,8 +558,8 @@ def test_default_off_render_body_has_no_bump_column_or_new_sections():
 
     assert "| package | old | new |" in body
     assert "bump" not in body
-    assert "Major update held back" not in body
-    assert "Major bump skipped" not in body
+    assert "Held back (update beyond declared constraint failed)" not in body
+    assert "Update beyond constraint skipped" not in body
 
 
 def test_report_json_includes_bump_field_for_a_major_update():
@@ -583,48 +583,58 @@ def test_report_json_includes_held_back_fields():
                 status="updated",
                 old_version="1.0.0",
                 new_version="1.1.0",
-                major_attempted_version="3.0.0",
-                major_failure_kind="test",
-                major_output_tail="assert failed",
+                beyond_constraint_version="3.0.0",
+                beyond_constraint_failure_kind="test",
+                beyond_constraint_output_tail="assert failed",
             )
         ]
     )
 
     data = json.loads(report_json(result))
     record = data[0]
-    assert record["major_attempted_version"] == "3.0.0"
-    assert record["major_failure_kind"] == "test"
-    assert record["major_output_tail"] == "assert failed"
+    assert record["beyond_constraint_version"] == "3.0.0"
+    assert record["beyond_constraint_failure_kind"] == "test"
+    assert record["beyond_constraint_output_tail"] == "assert failed"
     # the ordinary status/failure_kind fields are unaffected
     assert record["status"] == "updated"
     assert record["failure_kind"] is None
 
 
-def test_report_json_includes_major_skip_reason():
+def test_report_json_includes_beyond_constraint_skip_reason():
     result = UpdateResult(
         outcomes=[
-            _outcome(name="a", status="updated", major_skip_reason="exact version pin"),
+            _outcome(name="a", status="updated", beyond_constraint_skip_reason="exact version pin"),
         ]
     )
     data = json.loads(report_json(result))
-    assert data[0]["major_skip_reason"] == "exact version pin"
+    assert data[0]["beyond_constraint_skip_reason"] == "exact version pin"
 
 
 def test_render_body_updated_table_gets_bump_column_when_a_major_update_exists():
     result = UpdateResult(
         outcomes=[
             _outcome(
-                name="a", status="updated", old_version="1.0.0", new_version="2.0.0", bump="major"
+                name="a",
+                status="updated",
+                old_version="1.0.0",
+                new_version="2.0.0",
+                bump="major",
+                constraint_raised=True,
             ),
-            _outcome(name="b", status="updated", old_version="1.0.0", new_version="1.1.0"),
+            _outcome(
+                name="b", status="updated", old_version="1.0.0", new_version="1.1.0", bump="minor"
+            ),
+            _outcome(name="c", status="updated", old_version="1.0.0", new_version="1.0.0"),
         ]
     )
 
     body = render_body(result, "https://example.com/run/1")
 
     assert "| package | old | new | bump |" in body
-    assert "| a | 1.0.0 | 2.0.0 | major |" in body
-    assert "| b | 1.0.0 | 1.1.0 | in-range |" in body
+    assert "| a | 1.0.0 | 2.0.0 | major (raised) |" in body
+    assert "| b | 1.0.0 | 1.1.0 | minor |" in body
+    # c has no bump set at all (e.g. produced outside an allow-major run)
+    assert "| c | 1.0.0 | 1.0.0 | - |" in body
 
 
 def test_render_body_has_a_held_back_table_with_details():
@@ -635,34 +645,34 @@ def test_render_body_has_a_held_back_table_with_details():
                 status="updated",
                 old_version="1.0.0",
                 new_version="1.1.0",
-                major_attempted_version="3.0.0",
-                major_failure_kind="test",
-                major_output_tail="assertion failed in test",
+                beyond_constraint_version="3.0.0",
+                beyond_constraint_failure_kind="test",
+                beyond_constraint_output_tail="assertion failed in test",
             )
         ]
     )
 
     body = render_body(result, "https://example.com/run/1")
 
-    assert "Major update held back" in body
+    assert "Held back (update beyond declared constraint failed)" in body
     assert "| a | 1.0.0 | 3.0.0 | tests failed |" in body
     assert "<summary>a: output</summary>" in body
     assert "assertion failed in test" in body
 
 
-def test_major_skip_reasons_only_shown_when_include_major_skip_notes_is_true():
+def test_beyond_constraint_skip_reasons_only_shown_when_include_major_skip_notes_is_true():
     result = UpdateResult(
         outcomes=[
-            _outcome(name="a", status="updated", major_skip_reason="exact version pin"),
+            _outcome(name="a", status="updated", beyond_constraint_skip_reason="exact version pin"),
         ]
     )
 
     pr_body = render_body(result, "https://example.com/run/1")
     summary = render_body(result, "https://example.com/run/1", include_major_skip_notes=True)
 
-    assert "Major bump skipped" not in pr_body
+    assert "Update beyond constraint skipped" not in pr_body
     assert "exact version pin" not in pr_body
-    assert "Major bump skipped" in summary
+    assert "Update beyond constraint skipped" in summary
     assert "a (exact version pin)" in summary
 
 
@@ -676,9 +686,9 @@ def test_held_back_table_and_updated_table_both_render_together():
                 name="b",
                 status="skipped",
                 old_version="1.0.0",
-                major_attempted_version="3.0.0",
-                major_failure_kind="resolution",
-                major_output_tail="no matching version",
+                beyond_constraint_version="3.0.0",
+                beyond_constraint_failure_kind="resolution",
+                beyond_constraint_output_tail="no matching version",
             ),
         ]
     )
@@ -686,7 +696,7 @@ def test_held_back_table_and_updated_table_both_render_together():
     body = render_body(result, "https://example.com/run/1")
 
     assert "## ✅ Updated" in body
-    assert "Major update held back" in body
+    assert "Held back (update beyond declared constraint failed)" in body
     assert "## ⏭ No update available" in body
     assert "b" in body
 
@@ -697,9 +707,9 @@ def test_render_body_held_back_stays_within_budget_at_scale():
             name=f"pkg{i}",
             status="skipped",
             old_version="1.0.0",
-            major_attempted_version="3.0.0",
-            major_failure_kind="test",
-            major_output_tail="boom\n" * 100,
+            beyond_constraint_version="3.0.0",
+            beyond_constraint_failure_kind="test",
+            beyond_constraint_output_tail="boom\n" * 100,
         )
         for i in range(500)
     ]
@@ -717,8 +727,8 @@ def test_held_back_packages_output_property():
             _outcome(
                 name="b",
                 status="failed",
-                major_attempted_version="2.0.0",
-                major_failure_kind="resolution",
+                beyond_constraint_version="2.0.0",
+                beyond_constraint_failure_kind="resolution",
             ),
         ]
     )
@@ -732,8 +742,8 @@ def test_write_outputs_includes_held_back_packages(tmp_path):
             _outcome(
                 name="a",
                 status="updated",
-                major_attempted_version="2.0.0",
-                major_failure_kind="test",
+                beyond_constraint_version="2.0.0",
+                beyond_constraint_failure_kind="test",
             )
         ]
     )
@@ -775,15 +785,17 @@ def test_render_body_stays_under_budget_with_2000_of_every_major_bump_kind_too()
                 name=f"heldback-{i}",
                 status="skipped",
                 old_version="1.0.0",
-                major_attempted_version="3.0.0",
-                major_failure_kind="test",
-                major_output_tail="boom\n" * 100,
-                major_skip_reason=None,
+                beyond_constraint_version="3.0.0",
+                beyond_constraint_failure_kind="test",
+                beyond_constraint_output_tail="boom\n" * 100,
+                beyond_constraint_skip_reason=None,
             )
             for i in range(2000)
         ]
         + [
-            _outcome(name=f"majorskip-{i}", status="skipped", major_skip_reason="exact pin")
+            _outcome(
+                name=f"majorskip-{i}", status="skipped", beyond_constraint_skip_reason="exact pin"
+            )
             for i in range(2000)
         ]
     )
@@ -801,23 +813,23 @@ def test_render_body_stays_under_budget_with_2000_of_every_major_bump_kind_too()
     assert len(summary) <= MAX_SUMMARY_CHARS
 
 
-def test_report_json_drops_major_output_tail_too_when_too_large():
+def test_report_json_drops_beyond_constraint_output_tail_too_when_too_large():
     big = "x" * (200 * 1024)
     result = UpdateResult(
         outcomes=[
             _outcome(
                 name="a",
                 status="updated",
-                major_attempted_version="2.0.0",
-                major_failure_kind="test",
-                major_output_tail=big,
+                beyond_constraint_version="2.0.0",
+                beyond_constraint_failure_kind="test",
+                beyond_constraint_output_tail=big,
             ),
             _outcome(
                 name="b",
                 status="updated",
-                major_attempted_version="2.0.0",
-                major_failure_kind="test",
-                major_output_tail=big,
+                beyond_constraint_version="2.0.0",
+                beyond_constraint_failure_kind="test",
+                beyond_constraint_output_tail=big,
             ),
         ]
     )
@@ -826,7 +838,7 @@ def test_report_json_drops_major_output_tail_too_when_too_large():
 
     assert len(text.encode("utf-8")) <= 256 * 1024
     data = json.loads(text)
-    truncated = [r for r in data if r.get("major_output_truncated")]
+    truncated = [r for r in data if r.get("beyond_constraint_output_truncated")]
     assert truncated
     for record in truncated:
-        assert record.get("major_output_tail", "") == ""
+        assert record.get("beyond_constraint_output_tail", "") == ""
