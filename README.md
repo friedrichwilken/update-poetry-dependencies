@@ -1,267 +1,12 @@
-## Update Python Dependencies GitHub Action
+# Test-gated Python updates
 
-A GitHub Action to update your Poetry or uv dependencies, that ensures to not break anything by running tests after each package update.
+A GitHub Action that updates your Poetry or uv dependencies one package at a time, running your tests after each one, and opens a single pull request with the results.
 
-This GitHub Action is inspired by [gha-poetry-update](https://github.com/fuzzylabs/gha-poetry-update) but heavily modified. It updates your dependencies one top-level package at a time using [Poetry](https://python-poetry.org/) or [uv](https://docs.astral.sh/uv/), runs tests (optionally), and creates a pull request with the results.
+- **Tested per package** — only updates that pass your test command are kept; the rest are dropped, not forced on you.
+- **One pull request, not fifteen** — reused and updated every run instead of piling up duplicates.
+- **Failures are reported, not blocking** — a report table (and, optionally, a tracked issue), never a broken build.
 
-### Features
-
-1. Supports both Poetry and uv projects; auto-detected from the lock file present, or selected explicitly with `package-manager`.
-2. Each updated package is committed separately.
-3. Optionally test each update with a custom command — only successful updates are committed.
-4. Add labels and PR title prefixes to resulting pull request, to integrate with your CI/CD workflows.
-5. Reuses a fixed branch/PR across runs instead of piling up duplicate PRs.
-6. `dry-run` mode to see what would happen without pushing anything.
-
-### Versions
-
-- **`v2`** (this branch/version) is a breaking Python rewrite with uv support, a new bootstrap (see below), and new inputs/outputs. It is **not released yet**: the `v2`/`v2.0.0` tags only start existing once the maintainer pushes the first `v2.0.0` tag (see [`release.yml`](.github/workflows/release.yml)). Until then, pin to `@main` (moves with the default branch) or, for a reproducible/supply-chain-hardened pin, a full commit SHA — `friedrichwilken/update-poetry-dependencies@<sha>  # describe the commit`, the same pattern this repo's own workflows use for third-party actions.
-- **`v1`** is the original bash-based action. It is frozen at the `v1`/`v1.0.1` tags and unmaintained — it will not be moved or updated further. If you're still using it, see "Migrating from v1" below.
-
-### Migrating from v1
-
-`v2` is a breaking rewrite: Python instead of bash, `uv`-based bootstrapping, and some input/output changes. To migrate:
-
-1. Add an explicit `actions/checkout` step before this action in your workflow — v1 checked out the repository itself; v2 does not.
-2. Pass your token to **both** `actions/checkout`'s `token:` input and this action's `github_token` input (see "Token and permissions" below) — v1 only needed `github_token`.
-3. Check the [Inputs](#inputs) and [Outputs](#outputs) tables against your existing `with:` block — some defaults changed (e.g. `poetry-version` now defaults to a Poetry 2.x release) and `package-manager` is new (for uv support; defaults to `auto`-detecting from the lock file).
-4. Drop any `actions/setup-python` / `snok/install-poetry` steps you had before this action — v2's `uv`-based bootstrap replaces them entirely; see "How it bootstraps" below.
-
-### How it bootstraps
-
-The action installs [`astral-sh/setup-uv`](https://github.com/astral-sh/setup-uv) and uses `uv` for everything else: it runs itself on a fixed `uv`-managed interpreter, installs the project's `python-version` with `uv python install`, and — for Poetry projects — installs Poetry itself with `uv tool install poetry==<poetry-version>` and creates its in-project virtualenv directly with `uv venv`, pinned to that interpreter (Poetry then picks up the existing virtualenv automatically). You do not need `actions/setup-python`, `snok/install-poetry`, or a preinstalled `uv`/`poetry` in your workflow; just check out the repository first.
-
-Every run rebuilds `.venv` from scratch (`uv venv --clear`), so restoring `.venv` itself from a CI cache does nothing useful. If you want faster syncs, cache `uv`'s own package cache (e.g. `~/.cache/uv` on Linux/macOS, or `actions/cache` with `path: ~/.cache/uv` / the output of `uv cache dir`) instead.
-
-**Prerequisite: a clean manifest/lock file.** Before doing anything else, the action fails fast if `pyproject.toml` or the lock file in `directory` already have uncommitted changes (staged or not) — the update loop resets and commits exactly these files itself, and running it against a dirty working tree would otherwise either discard that uncommitted work (on a discarded update) or silently absorb it into one of this run's own commits. This is checked unconditionally, not just when `allow-major` is enabled. Commit or stash those changes before this action runs.
-
-### uv backend: scope and limits
-
-- Only the `pyproject.toml` in `directory` is read to find top-level dependencies. A `tool.uv.workspace` root's member projects are not iterated, and workspace `uv.lock` files live at the workspace root rather than in an individual member's directory — [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) are not supported yet.
-- If the project declares [`tool.uv.conflicts`](https://docs.astral.sh/uv/concepts/projects/dependencies/#conflicting-dependencies) (mutually exclusive extras/groups, e.g. a `cpu`/`gpu` extra pair), the default `uv sync --all-groups --all-extras` selection would try to install both sides at once and `uv sync` fails outright. When that is detected and `uv-sync-args` is not set, the action falls back to `uv sync` with no extras and only the default dependency groups, and prints a `::warning::`. Set `uv-sync-args` to choose what actually gets installed, e.g. `uv-sync-args: '--extra cpu --group dev'`.
-- If `test-command` itself invokes `uv run` (a common pattern, e.g. `uv run pytest`) with `with-groups`/`without-groups`/`only-groups` also set, be aware that `uv run` re-syncs the environment on its own before running anything, using **uv's own default group/extra selection** - not this action's narrower one (verified against real `uv==0.12.14`: a group this action's own `sync()` correctly excluded gets silently reinstalled for the duration of that `uv run` invocation). This never affects which packages get iterated/reported, only what a test-command that itself re-syncs actually sees installed while it runs. If a test genuinely depends on a group being absent, invoke `uv run --no-sync <command>` (or the venv's own interpreter directly, e.g. `.venv/bin/python -m pytest`) in `test-command` instead.
-
-### Inputs
-
-| Name              | Description                                                                                   | Default                       | Required |
-|-------------------|-----------------------------------------------------------------------------------------------|--------------------------------|----------|
-| python-version    | The Python version to use for the project.                                                    | `3.12.14`                      | no       |
-| package-manager   | Which package manager the project uses: `auto` (detected from the lock file in `directory`), `poetry`, or `uv`. | `auto`                          | no       |
-| poetry-version    | The Poetry version to use. Only used when the poetry backend is selected.                     | `2.4.3`                        | no       |
-| uv-sync-args      | Only used when the uv backend is selected. Overrides the default `--all-groups --all-extras` selection passed to `uv sync` (parsed as shell arguments, e.g. `--extra cpu --group dev`). Needed when the project declares `tool.uv.conflicts`. | `""`                            | no       |
-| directory         | The directory of the project files.                                                            | `./`                            | no       |
-| pr-title-prefix   | A prefix for the PR title.                                                                     | `""`                            | no       |
-| pr-labels         | A comma or newline separated list of labels for the PR.                                        | `""`                            | no       |
-| test-command      | A command to run tests after each update. Runs in `directory` via `bash -c` (e.g. `pytest` for Poetry, `uv run pytest` for uv). | `""`                            | no       |
-| branch-name       | Fixed branch name used for the update PR. Force-pushed on every run.                            | `deps/test-gated-updates`       | no       |
-| base-branch       | Base branch for the PR. If the checkout is detached (e.g. `pull_request` events), falls back to `GITHUB_BASE_REF`; if neither is available the action fails fast, before doing any work. | the currently checked out branch | no |
-| dry-run           | Run the full update loop but skip pushing the branch and creating/updating the PR.               | `false`                         | no       |
-| allow-major       | Opt-in: also attempt an update beyond the declared constraint (raising it) for a package whose constraint would otherwise exclude its latest release, falling back to the plain in-range update if that attempt fails. Despite the name, this is not always a semver-major bump. See "Beyond-constraint update attempts" below. | `false` | no |
-| strategy          | `per-package` (default): update, test and commit one top-level package at a time. `batch-first`: update every package at once and test once; falls back to the per-package loop on failure. Cuts test runs from N down to close to 1 in the happy path. See "`strategy`: `batch-first`" below. | `per-package` | no |
-| create-issues     | Opt-in: file one GitHub issue per top-level package that fails (or has a held-back beyond-constraint attempt), kept up to date and closed automatically across runs. Requires `issues: write` on the token. See "`create-issues`: filing issues for failures" below. | `false` | no |
-| issue-labels      | A comma or newline separated list of labels added to an issue created by `create-issues`. Labels must already exist in the repository - this action never creates one. | `""` | no |
-| update-transitive | Opt-in: after the top-level loop (and any `allow-major` beyond-constraint attempts) finish, one final tested step refreshes every dependency - transitive included - still updatable within its existing constraints, committed separately. See "`update-transitive`: refreshing transitive dependencies" below. | `false` | no |
-| with-groups       | A comma or newline separated list of dependency groups to additionally include when selecting what gets installed/synced (Poetry: its own optional groups; uv: additional groups on top of its own default selection - has no effect on which top-level packages are iterated, see "Dependency group selection" below). `main` names the project's own ungrouped dependencies. May be combined with `without-groups`; mutually exclusive with `only-groups`. | `""` | no |
-| without-groups    | A comma or newline separated list of dependency groups to exclude. `main` names the project's own ungrouped dependencies (`dev` additionally covers uv's legacy `tool.uv.dev-dependencies`). May be combined with `with-groups`; mutually exclusive with `only-groups`. See "Dependency group selection" below. | `""` | no |
-| only-groups       | A comma or newline separated list of dependency groups to exclusively include, dropping every other group. Mutually exclusive with `with-groups`/`without-groups`. See "Dependency group selection" below. | `""` | no |
-| github_token      | GitHub token for PR creation.                                                                   |                                  | **yes**  |
-
-### Outputs
-
-| Name              | Description                                                                 |
-|-------------------|------------------------------------------------------------------------------|
-| passed-packages   | Comma separated list of packages that were updated and passed the test command. |
-| failed-packages   | Comma separated list of packages whose update or test failed and were discarded. |
-| skipped-packages  | Comma separated list of packages that had nothing to update.                |
-| held-back-packages | Comma separated list of packages where an update beyond the declared constraint was attempted (`allow-major`) but held back; see "Beyond-constraint update attempts" below. |
-| pr-body           | The rendered report / PR body.                                              |
-| report-json       | JSON array of per-package records; see "Report" below for the field reference. |
-| issue-actions     | JSON array of planned/performed `create-issues` actions, one object per affected package: `{package, action, issue}`, plus an additive `error` field when that specific action's own `gh` call failed. `action` is `create`, `update`, or `close`; `issue` is the existing/created issue number, or `null` for a not-yet-created issue (always `null` in `dry-run`, since nothing is actually created, and also `null` for a failed create). `[]` when `create-issues` is not enabled. See "`create-issues`: filing issues for failures" below. |
-| transitive-report | A single JSON object reporting the `update-transitive` step: `{status, changed_packages, failure_kind, output_tail}`. The JSON literal `null` when `update-transitive` is not enabled, or the run aborted before the step ran. See "`update-transitive`: refreshing transitive dependencies" below. |
-
-The same report is also written to the job summary (`GITHUB_STEP_SUMMARY`), including in `dry-run`.
-
-### Report
-
-The PR body / job summary reports, per package: for an update, the old and new locked version; for a failure, the current and attempted version, whether it was a dependency-resolution failure or a test failure, and a collapsed block with the tail of the relevant output (resolver output for a resolution failure, test command output for a test failure). Package names, versions and failure reasons are escaped so they can never break the report's table formatting or be interpreted as markup.
-
-The report is rendered under an explicit character budget: well under GitHub's 65536 character PR body limit for `pr-body`, and a larger (but still bounded, ~900000 character) budget for the job summary, so the job summary can carry more detail than the PR body for the same run. At either size, table rows and per-package output blocks are dropped (with a "N more, see `report-json`/job summary" note) as needed to stay under the budget - the guarantee holds regardless of how many packages or how much output there is.
-
-If the update loop has to abort early (currently only when re-syncing the environment after a discarded update itself fails), the report still covers everything processed before the abort - already-made commits for packages that passed stay made locally, but the run is not pushed and no PR is created/edited - and starts with a "Run aborted: `<reason>`" banner.
-
-`report-json` carries the same per-package data as a stable, machine-readable array, one object per top-level package. Its total size is capped independently (~256 KiB): if needed, `output_tail` is dropped (in favor of `output_truncated: true`) from the packages with the largest captured output first, until it fits - every package still gets a record.
-
-| Field             | Type            | Description                                                                 |
-|-------------------|-----------------|-------------------------------------------------------------------------------|
-| name              | string          | The top-level package name.                                                 |
-| status            | string          | One of `updated`, `failed`, `skipped`.                                      |
-| old_version       | string \| null  | The version locked before this run touched the package, or `null` if unknown. |
-| new_version       | string \| null  | For `updated`/`skipped`: the resulting locked version. For `failed`: the version that was attempted before the change was reverted. `null` if unknown. |
-| failure_kind      | string \| null  | `resolution` (the update/lock step itself failed), `test` (the test command failed), or `null` for a non-failure. |
-| output_tail       | string          | Tail of the relevant captured output for a failure (empty otherwise), ANSI escape codes stripped. |
-| output_truncated  | boolean         | Only present (`true`) when `output_tail` was dropped to keep `report-json` under its size cap; absent otherwise. |
-| bump              | string          | Only present on an `updated` outcome produced while `allow-major` is enabled: the actual release segment that changed between `old_version` and `new_version` - `major`, `minor`, `patch`, or `other` (see below) - regardless of whether this was an in-range update or one that raised the constraint. |
-| constraint_raised | boolean         | Only present (`true`) when this outcome's own commit raised the declared constraint itself, as opposed to a plain in-range update (which never touches the manifest). |
-| beyond_constraint_version | string \| null | Only present when an update beyond the declared constraint was attempted for this package but held back (see "Beyond-constraint update attempts" below): the version the attempt tried. |
-| beyond_constraint_failure_kind | string \| null | Only present alongside `beyond_constraint_version`: `resolution` or `test`, same meaning as `failure_kind` but for the held-back attempt. |
-| beyond_constraint_output_tail | string | Only present alongside `beyond_constraint_version`: tail of the held-back attempt's captured output. |
-| beyond_constraint_output_truncated | boolean | Only present (`true`) when `output_tail`/`beyond_constraint_output_tail` were dropped together to keep `report-json` under its size cap. |
-| beyond_constraint_skip_reason | string | Only present when `allow-major` is enabled but no attempt to go beyond the declared constraint could be made for this package at all (e.g. a git/path dependency, an exact pin, an environment marker, an unparsable constraint, or an otherwise-successful attempt that had to be discarded). |
-| strategy          | string          | Only present (`"batch-first"`) when `strategy: batch-first` was requested for this run - on every outcome it produced, whichever path actually produced it (the batch's own test, a post-divergence verification test, or a per-package fallback). See "`strategy`: `batch-first`" below. |
-| tested_in_batch   | boolean         | Only present (`true`) on an outcome whose committed update was validated by one shared test run covering every package at once, rather than its own dedicated per-package test run. |
-| batch_test_failed | boolean         | Only present (`true`) on every outcome when `strategy: batch-first`'s own one-shot batch test failed and this run fell back to the per-package loop for everything. |
-| bundled_with      | string          | Only present on a `batch-first` outcome whose own sequential-replay step produced no lock change of its own because it was already sitting at the batch's target version - pulled there as a side effect of another package's own update in the same replay (most commonly a shared transitive dependency, e.g. updating one package already pulls in the exact version another one needed too). Names that other package; no separate commit exists for this one. |
-
-### Beyond-constraint update attempts (`allow-major`)
-
-`allow-major` (default `false`) is an opt-in, per-package extension of the same test-gated flow: for a package whose *declared constraint* has an effective upper bound (a caret/tilde/wildcard/`~=` Poetry constraint, or a PEP 508 specifier with `<`/`<=`/`~=`/`==x.*`), it is not enough to know a newer release exists - the ordinary in-range update never looks past that bound. Despite the input's name, going beyond a declared constraint is not necessarily a semver-major jump (`six >=1.10,<1.15` allowing `1.17.0` is a minor bump that merely exceeded the declared range) - `bump` always reports the real release segment that changed, computed from the actual version numbers, never assumed from the fact that a constraint was raised. When an effective upper bound is found, before the plain in-range update:
-
-1. **Attempt:** raise the declared constraint so the latest release is allowed (`poetry add "pkg[extras]@latest" --group <g>` / `--optional <extra>`, or for uv, rewrite just that requirement's specifier and re-lock with `uv add "pkg[extras]>=<bound>" --upgrade-package pkg`), then test exactly like an in-range update. If it passes, both `pyproject.toml` and the lock file are committed together (`Update <pkg> <old> -> <new> (constraint raised)`), tagged `constraint_raised: true` with `bump` set to the real delta, and the package is done - no separate in-range update runs for it.
-2. **Fallback:** if raising the constraint fails to resolve, resolves but fails the test command, or resolves and passes but has to be discarded (see below), every touched file (manifest *and* lock) is reset and the environment re-synced, and the plain in-range update (today's behavior) runs instead. Whichever outcome that produces - updated, failed, or "no update available" - also records the held-back attempt (`beyond_constraint_version`/`beyond_constraint_failure_kind`/`beyond_constraint_output_tail` in `report-json`; a `held-back-packages` output entry either way) or the discard reason (`beyond_constraint_skip_reason`) rather than a `failure_kind` - the tool itself did not fail, this action decided not to trust what it did.
-3. If the in-range update fails too, the package is `failed` exactly as it would be without `allow-major` - the held-back attempt's details are kept alongside it.
-
-A package whose constraint has no effective upper bound needs no separate attempt at all - the in-range update already reaches the latest release - and is never double-tested.
-
-Not every declaration shape can be safely rewritten without risking silently dropping information (an extra, a marker, an environment-specific source, ...). These are always skipped rather than guessed at, and reported via `beyond_constraint_skip_reason` (plus a compact line in the job summary - not the PR body, to keep it free of noise) rather than silently ignored:
-
-- a git/path/url/workspace dependency, or a direct URL reference (`pkg @ ...`)
-- more than one constraint entry for the package (e.g. per-Python-version marker-scoped table entries), or a Poetry `||` OR constraint where every alternative already has its own upper bound (unbounded if *any* alternative is open-ended - the union is then already unbounded and no attempt is needed)
-- a dependency carrying `markers`/`python`/`platform`/`source`/`allow-prereleases` keys this feature cannot faithfully preserve
-- an exact version pin (`==1.2.3`, or Poetry's bare `1.2.3`) - pinned on purpose, never touched
-- a constraint/specifier this action's PEP 440-ish parser cannot parse (including a version literal that fails to parse even when the operator syntax looks fine, e.g. `^abc`)
-- a legacy Poetry `optional = true` dependency not listed in any `[tool.poetry.extras]` entry (there is no extra name to pass `poetry add --optional` for it)
-- `python` itself
-
-After an attempt's tool call succeeds, two more checks can still discard it (same effect as a failure: reset and fall back to the in-range update, reported via `beyond_constraint_skip_reason`, not `failure_kind`):
-
-- the manifest is re-read and diffed against the original declaration; if anything other than the version constraint changed (extras dropped, moved to a different table, a marker appeared, ...), the change is discarded rather than kept - this action never keeps a change it cannot fully account for;
-- if the attempted version is a pre-release and the original was not, it is discarded - both Poetry and uv are expected to already exclude pre-releases by default, but this action never relies on that silently.
-
-The PR body gets a new "⚠️ Held back (update beyond declared constraint failed)" table (package, current, attempted, reason) with the same collapsed per-package output blocks as the "Failed" section, and the "✅ Updated" table gains a `bump` column (with a "(raised)" suffix on a row where the constraint itself was rewritten) once at least one package in the run used it. All of this is additive: with `allow-major` left at its default `false`, the rendered report and `report-json` are byte-identical to before this feature existed.
-
-**Prerequisite:** like the lock file, `pyproject.toml` must have no uncommitted changes before this action runs (see the "Prerequisite: a clean manifest/lock file" note above) - checked regardless of whether `allow-major` is enabled.
-
-### `strategy`: `batch-first`
-
-`strategy` (default `per-package`) picks how the update loop spends test runs. With N updatable top-level packages, `per-package` (today's behavior, unchanged) costs N test runs - one per package. `strategy: batch-first` (issue #23) is an opt-in alternative that costs only 1 in the happy path:
-
-1. **Batch:** update every top-level package at once (`poetry update <pkgs...>` / `uv lock --upgrade-package <pkg> ...` repeated once per package plus one `uv sync`) - in-range only; see "Interaction with `allow-major`" below. If nothing changed in the lock, every package is reported `skipped` and nothing is tested.
-2. **Test once**, against the whole batch.
-   - **Fails:** reset the lock/manifest back to the state before the batch ran, re-sync, and run the ordinary `per-package` loop for every package instead - worst case N+1 test runs total, same result the `per-package` strategy would have produced. `report-json` marks every outcome `batch_test_failed: true`, and the job summary gets a "Batch update failed tests, fell back to per-package" line.
-   - **Passes:** reset to the state before the batch again, then replay each changed package's own update and commit it on its own, in sequence, *without* testing in between - so the git history and PR report look exactly like a `per-package` run would have produced, just without paying for N-1 extra test runs. Once every package has been replayed, its result is compared against the batch's own lock file (every package's locked version, not just the top-level ones) - a resolver can be order-sensitive for transitive dependencies, so a package-by-package replay is not strictly guaranteed to reproduce the exact same lock the all-at-once batch update did:
-     - **Matches:** done. Every replayed package is reported `updated` with `tested_in_batch: true` (validated by the one batch test run, not its own). A package's own commit message and reported version always come from a fresh read right after its own replay step, never the batch's precomputed value, which a resolver can already have made stale by the time that step actually runs. A package that produces no lock change of its own because an *earlier* package's own replay step already pulled it to the batch's target version (a shared transitive dependency is the common case) needs no separate commit at all - it is still reported `updated`, tagged `bundled_with: "<other package>"` naming whichever commit the change actually lives in.
-     - **Diverges:** one more test run, against the diverged sequential result. Passes -> keep it (still `tested_in_batch: true` - validated by this one verification run covering everything, still nowhere near N runs). Fails -> discard every replay commit and fall back to the `per-package` loop for everything instead (this path does not set `batch_test_failed` - the batch's own test genuinely passed; it is the replay that could not be trusted). A replay step whose own update outright fails, or that produces neither a lock change nor lands on the batch's own target version for that package, is always a real failure (never excused as "bundled") and skips this verification grace period entirely - there is nothing coherent left to verify.
-
-A re-sync failure at any point aborts the whole run with whatever partial result exists so far, exactly like `per-package` (see "Report" above).
-
-**Interaction with `allow-major`:** the batch step itself only ever performs in-range updates, even when `allow-major` is enabled - keeping the batch itself simple and predictable. Once the batch (or its replay) has landed, `allow-major`'s beyond-constraint attempts still run exactly as they do without `batch-first`: one at a time, per package, each with its own test run. A package that both got an in-range update from the batch *and* has a further beyond-constraint attempt available ends up with two commits (the batch-replay's in-range commit, then the beyond-constraint commit on top) instead of one, but is still reported as a single outcome spanning the whole journey (`old_version` from before the batch ran, `new_version`/`bump`/`constraint_raised` from the beyond-constraint attempt). In short: `batch-first` only ever saves test runs on the in-range portion of the work; `allow-major`'s own test-per-attempt cost is unchanged either way.
-
-`report-json` marks every outcome of a `batch-first` run with `strategy: "batch-first"` (whichever path actually produced it, including a fallback to `per-package`), additionally to `tested_in_batch`/`batch_test_failed`/`bundled_with` above. All of this is additive: with `strategy` left at its default `per-package`, the rendered report, job summary and `report-json` are byte-identical to before this feature existed.
-
-### `create-issues`: filing issues for failures
-
-`create-issues` (default `false`) is an opt-in extension that hands failures off to a durable, trackable GitHub issue instead of (or in addition to) the PR report, which only ever reflects the latest run. It runs after the PR is created/edited (so the issue can link to it) and requires `issues: write` on the token (see "Token and permissions" below).
-
-**One issue per package, never per run.** An issue is filed for every top-level package whose outcome this run is `failed`, or that has a held-back beyond-constraint attempt (`beyond_constraint_failure_kind` set - see "Beyond-constraint update attempts" above); a package that is both (the beyond-constraint attempt *and* the in-range fallback both failed) gets one issue about the plain failure, not two.
-
-**Identity requires all three** of a hidden marker in the issue body, `<!-- test-gated-updates:pkg=<name> -->` (`<name>` is the PEP 503 normalized package name) - **never the title**, which is free to change between runs and is never matched on; a second hidden marker, `<!-- test-gated-updates:state=<version>|<kind> -->`, which records what the last run reported, so the action can tell whether anything actually changed without an extra `gh` call; and a footer line stating the issue is managed automatically. Every issue this action creates always carries all three, so requiring all three (rather than the pkg marker alone) only ever makes the check *stricter* - it rules out, for example, a documentation/discussion issue that merely quotes the marker syntax as an example being mistaken for a managed one (a real false positive found while building this feature: this repo's own design issue for it, #28, does exactly that). The one edge case this cannot rule out: copy-pasting a managed issue's entire body verbatim into an unrelated issue would make that issue managed too - accepted as out of scope.
-
-Every run, for every package that needs an issue this way:
-
-| Situation | Action |
-|---|---|
-| No existing open managed issue for the package | **Create** one: title `<pkg>: update to <attempted> fails (<kind>)`, or for a held-back attempt, `<pkg>: update beyond declared constraint to <version> fails (<kind>)` - truncated to 256 characters if needed (the package name is always kept intact; only the version/kind tail is cut, with a trailing ellipsis). Body: the pkg marker, current -> attempted version, failure kind, the tail of the relevant captured output (the same safe, fenced rendering as the PR body/job summary - see `report.py`), a link to the workflow run, a link to the PR if one was created/edited this run (`null`/omitted in `dry-run`, since none is), a "last seen" note, and a footer explaining the issue is managed automatically. Labels come from `issue-labels`, exactly like `pr-labels` (only passed with `--label` when non-empty) - **the label must already exist**, this action never creates one. |
-| An existing open managed issue for the package | **Update** its body to the current state (the pkg marker is kept as-is). A **comment is added only if** the attempted version or failure kind changed since the state marker's last recorded value - an unchanged, still-failing package is updated silently, not re-commented on every run. |
-| An existing open managed issue whose package is *not* failed/held-back in this run's outcomes | **Close** it, with a comment linking to the run (and the PR, if any) - the package either updated successfully, had nothing to update, or is no longer a top-level dependency at all. For the reserved `transitive-dependencies` marker (see "`update-transitive`" above) specifically, if `update-transitive` is disabled this run, the close comment says so instead of the usual "no longer failing" - that claim would not be true, since nothing was actually checked. |
-| More than one open managed issue for the same package | The **lowest-numbered** one is treated as canonical (used for the update/close rules above); every other one is **closed** with a "Duplicate of #\<n\>" comment. This can happen because the lookup below is not a single atomic source of truth - see "Finding existing managed issues". |
-| An open issue missing any of the three identity signals above | **Never touched.** Only issues this action itself created (or something that reproduces all three signals - see above) are ever edited or closed. |
-
-**Finding existing managed issues** always starts from a plain, unfiltered `gh issue list --state open --json number,body --limit 200` - GitHub's issue *search* index is only eventually consistent, so it is never the primary/only source: relying on it first could miss an issue this same run (or a concurrent one) just created and file a duplicate. Only if that plain listing comes back at exactly its `--limit` (i.e. it may itself have been truncated - there are more than 200 open issues in the repository) does a second, `gh issue list --search '"test-gated-updates:pkg=" in:body'`-narrowed call additionally run, merged in by issue number. Either way, every candidate's identity is always re-confirmed locally (all three signals above) before it is trusted, never taken from the search match alone.
-
-**Aborted runs:** if the update loop itself aborts (`UpdateAborted` - see "Report" above), issue management is skipped entirely and a `::notice::` is printed - the outcome list for an aborted run is only partial, and treating a package missing from it as "no longer failing" would incorrectly close its issue.
-
-**Dry-run:** performs no `gh` writes at all (no create/update/comment/close calls) - only the read-only listing(s) above run, so the plan can still be computed against real repository state. The planned actions are printed and exposed in the `issue-actions` output (`[]` when `create-issues` is off, always) as `{package, action, issue}` objects, e.g.:
-
-```json
-[{"package": "idna", "action": "create", "issue": null}]
-```
-
-A compact one-line summary (e.g. `Issue actions: 1 created, 0 updated (0 commented), 0 closed (dry-run: planned only, no writes performed).`) is also appended to the job summary.
-
-**One failing action never loses the rest.** Each package's `gh` call(s) are isolated - if e.g. one issue can no longer be commented on (deleted, transferred, locked, ...), every other package's create/update/close for this run still goes ahead. The failed action still shows up in `issue-actions`, with an additive `error` field (and `issue: null` where no issue number is known, e.g. a failed create); `run()` prints one `::warning::` per failure. **Failures never fail the run** in any case: once the PR has been created/edited, it is this action's primary product, so create-issues failures (rate limits, a missing label, a missing permission, an individual `gh` call failing, ...) never turn into a non-zero exit code.
-
-### `update-transitive`: refreshing transitive dependencies
-
-Every other feature above only ever touches *top-level* packages (`poetry show -T` / this action's own uv equivalent). `update-transitive` (default `false`, issue #24) is an opt-in, run-level (not per-package) final step: after the top-level loop (either `strategy`) and any `allow-major` beyond-constraint attempts have both finished, it refreshes *everything* - transitive dependencies included, and any top-level package `with-groups`/`without-groups`/`only-groups` left out of this run's own iteration - that is still updatable within its already-declared constraints:
-
-1. **Refresh:** `poetry update --lock --no-interaction` / `uv lock --upgrade`, then a `sync()` - verified against real `poetry==2.4.3`/`uv==0.12.14` to only ever change the lock file, never `pyproject.toml`. If the lock does not change, nothing further happens (reported as `"unchanged"` - see below).
-2. **Test once**, against the refreshed lock - exactly like every other tested step in this action.
-   - **Passes:** committed as its own commit, `Update transitive dependencies`.
-   - **Fails**, or the refresh command itself fails to resolve: the lock file is reset back to its pre-step state and the environment re-synced; nothing is committed.
-
-Unlike a per-package update, one lock-wide refresh has no single old/new version of its own, so it is **not** folded into `report-json`'s per-package array - it gets its own `transitive-report` output instead: a single JSON object, `{status, changed_packages, failure_kind, output_tail}`. `status` is `"updated"`, `"failed"`, or `"unchanged"`; `changed_packages` is an array of `{name, old, new}` for every package the lock's own before/after snapshot differed on (not just whichever package(s) the refresh command directly targeted - moving one package can move others), present even for a discarded `"failed"` attempt, to show what would have changed; `failure_kind` (`"resolution"` or `"test"`, same meaning as `report-json`'s own field) and `output_tail` are only present when `status` is `"failed"`. The JSON literal `null` when `update-transitive` is off (the default) or a run aborted before the step ran - this keeps `transitive-report` (and every other output) byte-identical to before this feature existed for a run that does not use it.
-
-The PR body / job summary get a new "🔁 Transitive dependencies" section (only ever rendered when the step actually ran this run) listing every changed package's old -> new version, or, on failure, the same collapsed output block used everywhere else in the report.
-
-**Interaction with `create-issues`:** a failed `update-transitive` step files one managed issue, keyed by the reserved package name `transitive-dependencies` (reusing exactly the same create/update/close machinery documented below, just with its own title - `transitive dependencies: lock-wide refresh fails (<kind>)` - and body, listing every changed package (name, old -> new, capped) ahead of the captured output, since a lock-wide refresh has no single package/version of its own to put in the usual title/table), and closes it automatically once the step later passes (or is unchanged) again. If `update-transitive` is later turned back off while an issue for it is still open, that issue is still closed (nothing is tracking it any more), but with a close comment that says the feature is disabled rather than the usual "no longer failing" - that claim would not be true, since nothing was actually checked this run.
-
-**Interaction with an aborted run:** if the run aborts (`UpdateAborted`) - whether during the top-level loop or during this step's own re-sync - the report still reflects whatever `transitive-report` state exists at that point (the step's own `"failed"` outcome if the abort happened while discarding it, otherwise `null`), the same "partial, not pushed" handling as everywhere else (see "Report" above).
-
-### Dependency group selection (`with-groups`/`without-groups`/`only-groups`)
-
-`with-groups`, `without-groups` and `only-groups` (all default `""`, issue #4) control which dependency **groups** this action considers, for both (1) which top-level packages get iterated by the update loop, and (2) what gets installed/synced so tests run against the intended set. All three are comma/newline separated lists (parsed exactly like `pr-labels`); `with-groups` and `without-groups` may be combined, but `only-groups` is mutually exclusive with both - combining it with either fails fast (`ActionError`) before anything else runs, as does naming a group that does not exist in the project's `pyproject.toml` - both checked before bootstrap/install, let alone the update loop itself.
-
-`"main"` names the project's own ungrouped dependencies (`[project.dependencies]` / `[tool.poetry.dependencies]`) - never a real group in either backend's own vocabulary, but always a valid name here for symmetry with the named groups.
-
-**Poetry:** maps straight onto `poetry show -T`/`install`/`sync`'s own `--with`/`--without`/`--only` flags (verified against real `poetry==2.4.3` - `"main"` is already a real group name to Poetry itself, no special-casing needed). With none of the three set, behavior is unchanged from before this feature existed. A `[dependency-groups]` (PEP 735) name is only ever a valid group when `poetry-version` is `2.2` or later - PEP 735 support was added in Poetry 2.2.0 ("Add support for PEP 735 dependency groups", [poetry#10130](https://github.com/python-poetry/poetry/releases/tag/2.2.0), verified empirically too: `poetry==2.1.4` silently ignores the whole table, `poetry==2.2.0` honors it); naming such a group with an older `poetry-version` fails fast with a message saying so, rather than the generic "unknown group" error.
-
-**uv:** has no single built-in command that lists top-level dependency names the way `poetry show -T` does (this action already parses `pyproject.toml` directly for that - see `updater/pyproject_deps.py`), so the listing side is filtered in Python against `"main"` (`[project.dependencies]`), `"dev"` (the legacy `[tool.uv.dev-dependencies]` list *or* a `dev` key inside `[dependency-groups]` - both mean the same thing), and every other `[dependency-groups]` (PEP 735) name - including following `{include-group = "..."}` entries *transitively* (cycle-safe), exactly like uv's own resolver does (verified against real `uv==0.12.14`): a package declared under a group reachable through another still-active group's `include-group` chain is still considered included, even if its own declaring group was named in `without-groups` - e.g. given `test = ["certifi"]` and `dev = [{include-group = "test"}, "six"]`, `only-groups: dev` includes both `six` and `certifi`, `only-groups: test` includes only `certifi`, and `without-groups: test` still includes `certifi` (reachable through `dev`, which was never excluded). `with-groups` has no effect on the listing side: with none of the three set, every group is already iterated (today's behavior, unchanged), so there is nothing left for `with-groups` to add back - it only matters for what gets synced. For `uv sync`, once any of the three is set, the selection switches from this action's own permissive default (`--all-groups --all-extras`, unchanged when none of the three are set) to uv's own native default group set (main plus whatever is a default group, most commonly just `dev`) adjusted by `--group`/`--no-group`/`--only-group` (verified against real `uv==0.12.14`: `--only-group <g>` already excludes `"main"` and every other group on its own, so an `only-groups` selection that also wants `"main"` pairs `--no-default-groups` with a `--group` per other requested name instead; `--group`/`--no-group`/`--only-group` handle PEP 735 `include-group` transitivity natively, uv's own job, not this action's). Extras (`--all-extras`, or nothing under `tool.uv.conflicts` - see "uv backend: scope and limits" above) are a separate axis this feature does not touch, either way. `without-groups: main` is fully honored for *listing* (main-declared packages are simply not iterated - a pure `pyproject.toml` parse, no uv flag needed) but **cannot** be honored for `uv sync`'s own selection - uv has no flag to exclude `[project.dependencies]` from `sync` while still installing other groups, so main is still installed either way; a `::warning::` is printed once when this applies. **`uv-sync-args`, when set, always wins for sync** and replaces the selection outright, same as without this feature at all - `without-groups`/`only-groups` then only ever filter the listing side (`with-groups` still has no listing effect either way).
-
-### Token and permissions
-
-A pull request opened with the default, ephemeral `GITHUB_TOKEN` does **not** trigger other `pull_request` (or `pull_request_target`) workflows — this is a deliberate GitHub Actions restriction to stop workflows from recursively triggering themselves. If you rely on CI checks running against the PR this action opens, `GITHUB_TOKEN` alone will leave it with no checks at all.
-
-To get normal CI on the resulting PR, use a fine-grained personal access token or a GitHub App installation token instead, with at least:
-
-- `contents: write` (push the update branch)
-- `pull-requests: write` (create/edit the PR, add labels)
-- `issues: write` too, only if you enable `create-issues` (see above) - it also covers the read-only `gh issue list` lookup `create-issues` needs, so no separate `issues: read` is needed
-
-That token has to be passed in **two** places, because two different things authenticate independently:
-
-1. `actions/checkout`'s `token:` input — `actions/checkout` persists this as the git credential for the checkout, and this action's own `git push` (see `updater/git_repo.py`) relies entirely on those persisted credentials; it never receives or handles a token itself for the push.
-2. This action's `github_token` input — used for `gh pr create`/`gh pr edit` (see `updater/github_pr.py`) and, when `create-issues` is enabled, `gh issue list`/`create`/`edit`/`comment`/`close` (see `updater/github_issues.py`), which all shell out to the `gh` CLI authenticated via `GH_TOKEN`.
-
-```yaml
-- uses: actions/checkout@v4
-  with:
-    token: ${{ secrets.DEPS_UPDATE_TOKEN }}
-
-- uses: friedrichwilken/update-poetry-dependencies@v2 # see "Versions" above - not released yet, pin to @main or a SHA until v2.0.0 exists
-  with:
-    github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
-    # ... other inputs
-```
-
-If you'd rather stick with `GITHUB_TOKEN` (accepting that the PR gets no automatic checks, or that you trigger checks another way, e.g. `workflow_run`), the calling workflow must still declare the permissions explicitly — the repository default for `GITHUB_TOKEN` is often read-only:
-
-```yaml
-permissions:
-  contents: write
-  pull-requests: write
-```
-
-Either way, the repository setting **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"** must be enabled, or PR creation is rejected outright regardless of which token is used.
-
-### Usage Example
-
-The action no longer checks out the repository itself — do that in the calling workflow before using it. `package-manager` defaults to `auto`, so it usually does not need to be set explicitly.
-
-These examples pin to the `v2` major tag, which the [release workflow](.github/workflows/release.yml) will move to point at the latest `v2.x.y` release — **but see "Versions" above: `v2` does not exist yet.** Until the first `v2.0.0` tag is pushed, pin to `@main` or a full commit SHA instead (`friedrichwilken/update-poetry-dependencies@<sha>  # describe the commit`) — see how this repo's own workflows pin their third-party actions for the pattern.
-
-This repository dogfoods the action on itself; see [`.github/workflows/update_dependencies.yml`](.github/workflows/update_dependencies.yml) for a complete, currently-running example (uv backend).
-
-#### Poetry project
+## Quick start (uv)
 
 ```yaml
 name: update dependencies
@@ -273,78 +18,45 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # issues: write   # only needed with create-issues: 'true' below
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: friedrichwilken/test-gated-python-updates@v2
         with:
-          token: ${{ secrets.DEPS_UPDATE_TOKEN }}
-
-      - uses: friedrichwilken/update-poetry-dependencies@v2 # not released yet - pin to @main or a SHA, see "Versions" above
-        with:
-          python-version: '3.12.14'
-          poetry-version: '2.4.3'
-          directory: './'
-          pr-title-prefix: '[Poetry Update] '
-          pr-labels: 'dependencies'
-          test-command: 'pytest'
-          branch-name: 'deps/test-gated-updates'
-          # create-issues: 'true'          # opt-in - see "create-issues" above; needs issues: write above
-          # issue-labels: 'dependencies'   # only used when create-issues is enabled
-          github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
-```
-
-#### uv project
-
-```yaml
-name: update dependencies
-on:
-  schedule:
-    - cron: '0 6 * * 1'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-  pull-requests: write
-  # issues: write   # only needed with create-issues: 'true' below
-
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
-
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.DEPS_UPDATE_TOKEN }}
-
-      - uses: friedrichwilken/update-poetry-dependencies@v2 # not released yet - pin to @main or a SHA, see "Versions" above
-        with:
-          python-version: '3.12.14'
-          package-manager: 'uv'
-          directory: './'
-          pr-title-prefix: '[uv Update] '
-          pr-labels: 'dependencies'
           test-command: 'uv run pytest'
-          branch-name: 'deps/test-gated-updates'
-          # create-issues: 'true'          # opt-in - see "create-issues" above; needs issues: write above
-          # issue-labels: 'dependencies'   # only used when create-issues is enabled
-          github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### Maintaining this repo
+Using Poetry? Change `test-command` to `'poetry run pytest'` — everything else auto-detects. Full walkthrough: [tutorial](docs/tutorials/weekly-updates.md).
 
-Notes for whoever maintains `friedrichwilken/update-poetry-dependencies` itself (not relevant to consumers of the action):
+The default `GITHUB_TOKEN` above won't trigger your CI on the PR it opens — see [token and permissions](docs/manual/token-and-permissions.md) for why, and for a PAT that fixes it.
 
-- [`dependabot_automerge.yml`](.github/workflows/dependabot_automerge.yml) only actually enables auto-merge on a Dependabot PR if the repository setting **Settings → General → Pull Requests → "Allow auto-merge"** is on; if it's off, the workflow prints a `::warning::` and exits cleanly instead of failing.
-- [`update_dependencies.yml`](.github/workflows/update_dependencies.yml) needs a `DEPS_UPDATE_TOKEN` secret (see "Token and permissions" above) to get CI running on the PRs it opens; it falls back to `github.token` otherwise.
-- [`release.yml`](.github/workflows/release.yml) only reacts to a pushed `vX.Y.Z` tag and only ever force-moves the major tag matching that same `X` — pushing a `v2.0.0` tag is what turns on `v2` for the first time.
+## What you get
+
+A pull request with a report, e.g.:
+
+| Package | Result | Detail |
+|---|---|---|
+| six | updated | 1.16.0 → 1.17.0 |
+| idna | failed | test failed at 3.7 |
+
+## Going further
+
+- [`allow-major`](docs/manual/allow-major.md) — attempt updates beyond the declared constraint.
+- [`strategy: batch-first`](docs/manual/strategies.md) — cut N test runs down to about 1.
+- [`create-issues`](docs/manual/create-issues.md) — track failures as durable GitHub issues.
+- [`update-transitive`](docs/manual/update-transitive.md) — refresh transitive dependencies too.
+- [Dependency groups](docs/manual/dependency-groups.md) — `with-groups`/`without-groups`/`only-groups`.
+- [`dry-run` and outputs](docs/manual/dry-run.md) — preview a run, or consume `report-json` yourself.
+- [Token and permissions](docs/manual/token-and-permissions.md) — get real CI running on the PR.
+
+## Learn more
+
+- [Tutorial: a weekly dependency-update workflow](docs/tutorials/weekly-updates.md)
+- [Manual](docs/manual/README.md) — full reference for every input and output.
+- [Migrating from v1](docs/manual/migrating-from-v1.md)
+- [This repo's own weekly workflow](.github/workflows/update_dependencies.yml) — a live example.

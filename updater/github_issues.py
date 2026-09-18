@@ -103,7 +103,7 @@ _VALID_NORMALIZED_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 _MANAGED_BY_FOOTER = (
     "_This issue is managed automatically by the "
-    "[update-poetry-dependencies](https://github.com/friedrichwilken/update-poetry-dependencies) "
+    "[test-gated-python-updates](https://github.com/friedrichwilken/test-gated-python-updates) "
     "action's `create-issues` feature: it is updated on every run while the "
     "package keeps failing or being held back, and closed automatically "
     "once it no longer is. It should not be edited by hand._"
