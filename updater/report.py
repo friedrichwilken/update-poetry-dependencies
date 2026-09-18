@@ -319,8 +319,21 @@ def render_body(
     held_back = [o for o in result.outcomes if o.held_back_beyond_constraint]
     beyond_constraint_skipped = [o for o in result.outcomes if o.beyond_constraint_skip_reason]
 
+    # strategy: batch-first (issue #23) - additive, only ever true when
+    # that strategy was requested and its one-shot batch test itself
+    # failed, so every outcome fell back through the ordinary per-package
+    # loop instead (see `updater._fall_back_to_per_package`). A run using
+    # the default per-package strategy never sets this, so the banner
+    # never appears and this renders byte-identically to before the
+    # feature existed.
+    batch_fallback_banner = (
+        "⚠️ Batch update failed tests, fell back to per-package.\n\n"
+        if any(o.batch_test_failed for o in result.outcomes)
+        else ""
+    )
+
     banner = f"⚠️ **Run aborted:** {aborted_reason}\n\n" if aborted_reason else ""
-    header = f"{banner}Workflow run: {run_url}"
+    header = f"{batch_fallback_banner}{banner}Workflow run: {run_url}"
 
     if not updated and not failed and not skipped:
         body = f"{header}\n\nNo packages were updated - nothing changed in this run.\n"
@@ -406,6 +419,14 @@ def _outcome_to_dict(o: PackageOutcome, drop_output: bool = False) -> dict:
             record["beyond_constraint_output_truncated"] = True
     if o.beyond_constraint_skip_reason:
         record["beyond_constraint_skip_reason"] = o.beyond_constraint_skip_reason
+    if o.strategy:
+        record["strategy"] = o.strategy
+    if o.tested_in_batch:
+        record["tested_in_batch"] = True
+    if o.batch_test_failed:
+        record["batch_test_failed"] = True
+    if o.bundled_with:
+        record["bundled_with"] = o.bundled_with
     return record
 
 

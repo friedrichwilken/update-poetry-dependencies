@@ -45,6 +45,14 @@ class GitRepo:
         touches anything untracked such as a .venv)."""
         self.runner.run(["git", "checkout", "--", *paths], cwd=self.directory)
 
+    def reset_hard(self, sha: str) -> CommandResult:
+        """Discard commits made since `sha` (and any uncommitted changes)
+        by hard-resetting to it. Only used by the batch-first strategy
+        (see `updater._discard_commits_since`) to undo its own
+        not-yet-pushed sequential replay commits when they turn out not to
+        be trustworthy - never touches anything that was already pushed."""
+        return self.runner.run(["git", "reset", "--hard", sha], cwd=self.directory)
+
     def stage(self, paths: list[str]) -> None:
         self.runner.run(["git", "add", "--", *paths], cwd=self.directory)
 

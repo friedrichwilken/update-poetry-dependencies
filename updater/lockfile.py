@@ -71,3 +71,36 @@ def locked_version(lock_path: Path | str, package: str) -> str | None:
     if not versions:
         return None
     return ", ".join(sorted(versions))
+
+
+def all_locked_versions(lock_path: Path | str) -> dict[str, str]:
+    """Every package's locked version(s) in one parse, keyed by normalized
+    name - same join-multiple-versions-per-name behavior as
+    `locked_version()` above, just for the whole lock file at once rather
+    than one package.
+
+    Used by the batch-first strategy (see `updater.py`) to verify that
+    replaying a batch update's packages one at a time, in sequence,
+    reproduces exactly the same lock file the one-shot batch update
+    produced - a resolver can be order-sensitive for transitive
+    dependencies, so this is a cheap, backend-agnostic way to catch that
+    rather than trusting the replay blindly."""
+    path = Path(lock_path)
+    if not path.is_file():
+        return {}
+    try:
+        data = _load(path)
+    except tomllib.TOMLDecodeError, OSError, UnicodeDecodeError:
+        return {}
+
+    versions: dict[str, set[str]] = {}
+    for entry in data.get("package") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        version = entry.get("version")
+        if not name or not version:
+            continue
+        versions.setdefault(normalize_name(name), set()).add(str(version))
+
+    return {name: ", ".join(sorted(vs)) for name, vs in versions.items()}

@@ -60,6 +60,103 @@ def test_uv_backend_update_package_does_not_sync_when_lock_fails():
     assert len(runner.calls) == 1
 
 
+# --- update_all / all_locked_versions (batch-first strategy, issue #23) -
+
+
+def test_uv_backend_update_all_upgrades_every_package_in_one_lock_call_then_syncs():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    backend.update_all(["idna", "six"])
+
+    assert runner.calls[0] == {
+        "args": [
+            "uv",
+            "lock",
+            "--upgrade-package",
+            "idna",
+            "--upgrade-package",
+            "six",
+            "--python",
+            "3.12",
+        ],
+        "cwd": "some/dir",
+    }
+    assert runner.calls[1]["args"][:2] == ["uv", "sync"]
+
+
+def test_uv_backend_update_all_does_not_sync_when_lock_fails():
+    runner = FakeCommandRunner(results=[result(False, stderr="boom")])
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    update_result = backend.update_all(["idna", "six"])
+
+    assert not update_result.ok
+    assert len(runner.calls) == 1
+
+
+def test_uv_backend_update_all_with_no_packages_still_locks_and_syncs():
+    runner = FakeCommandRunner()
+    backend = UvBackend(runner, "some/dir", "3.12")
+
+    backend.update_all([])
+
+    assert runner.calls[0]["args"] == ["uv", "lock", "--python", "3.12"]
+
+
+def test_poetry_backend_update_all_updates_every_package_in_one_call():
+    runner = FakeCommandRunner()
+    backend = PoetryBackend(runner, "some/dir", "2.4.3")
+
+    backend.update_all(["idna", "six"])
+
+    assert runner.calls == [
+        {
+            "args": ["poetry", "update", "idna", "six", "--no-interaction"],
+            "cwd": "some/dir",
+        }
+    ]
+
+
+def test_uv_backend_all_locked_versions_reads_every_package(tmp_path):
+    (tmp_path / "uv.lock").write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4"
+
+        [[package]]
+        name = "six"
+        version = "1.15.0"
+        """
+    )
+    backend = UvBackend(FakeCommandRunner(), str(tmp_path), "3.12")
+
+    assert backend.all_locked_versions() == {"idna": "3.4", "six": "1.15.0"}
+
+
+def test_poetry_backend_all_locked_versions_reads_every_package(tmp_path):
+    (tmp_path / "poetry.lock").write_text(
+        """
+        [[package]]
+        name = "idna"
+        version = "3.4"
+
+        [[package]]
+        name = "six"
+        version = "1.15.0"
+        """
+    )
+    backend = PoetryBackend(FakeCommandRunner(), str(tmp_path), "2.4.3")
+
+    assert backend.all_locked_versions() == {"idna": "3.4", "six": "1.15.0"}
+
+
+def test_all_locked_versions_missing_lock_file_returns_empty_dict(tmp_path):
+    backend = UvBackend(FakeCommandRunner(), str(tmp_path), "3.12")
+    assert backend.all_locked_versions() == {}
+
+
 def test_uv_backend_lock_file_path_and_files_to_stage():
     backend = UvBackend(FakeCommandRunner(), "some/dir", "3.12")
 

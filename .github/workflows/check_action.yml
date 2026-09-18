@@ -78,6 +78,7 @@ jobs:
             # means this never actually writes to GitHub (see the
             # "create-issues" README section).
             create_issues: 'true'
+            strategy: 'per-package'
             scenario: basic
           - package_manager: uv
             name_suffix: ''
@@ -87,6 +88,7 @@ jobs:
             venv_python_command: 'uv run python --version'
             allow_major: 'false'
             create_issues: 'true'
+            strategy: 'per-package'
             scenario: basic
           - package_manager: poetry
             name_suffix: ', major'
@@ -96,6 +98,7 @@ jobs:
             venv_python_command: 'poetry run python --version'
             allow_major: 'true'
             create_issues: 'false'
+            strategy: 'per-package'
             scenario: major
           - package_manager: uv
             name_suffix: ', major'
@@ -105,7 +108,57 @@ jobs:
             venv_python_command: 'uv run python --version'
             allow_major: 'true'
             create_issues: 'false'
+            strategy: 'per-package'
             scenario: major
+          # strategy: batch-first (issue #23) - two families of entries:
+          # "batch" reuses the basic fixtures, whose idna update
+          # deliberately fails the test command, so the batch as a whole
+          # fails and falls back to the per-package loop - same final
+          # outcome as the plain "basic" entries above (idna failed, six
+          # updated), but report-json must show batch_test_failed: true.
+          # "batch happy" uses a dedicated fixture where every package
+          # updates cleanly, to exercise (and count) the actual happy
+          # path - see the "Assert exactly one test run" step below.
+          - package_manager: poetry
+            name_suffix: ', batch'
+            directory: tests/fixture/poetry
+            python_version: '3.12'
+            test_command: 'poetry run python check.py'
+            venv_python_command: 'poetry run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'batch-first'
+            scenario: batch-fallback
+          - package_manager: uv
+            name_suffix: ', batch'
+            directory: tests/fixture/uv
+            python_version: '3.13'
+            test_command: 'uv run python check.py'
+            venv_python_command: 'uv run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'batch-first'
+            scenario: batch-fallback
+          - package_manager: poetry
+            name_suffix: ', batch happy'
+            directory: tests/fixture/poetry-batch
+            python_version: '3.12'
+            test_command: 'poetry run python check.py'
+            venv_python_command: 'poetry run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'batch-first'
+            scenario: batch-happy
+          - package_manager: uv
+            name_suffix: ', batch happy'
+            directory: tests/fixture/uv-batch
+            python_version: '3.13'
+            test_command: 'uv run python check.py'
+            venv_python_command: 'uv run python --version'
+            allow_major: 'false'
+            create_issues: 'false'
+            strategy: 'batch-first'
+            scenario: batch-happy
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -121,11 +174,16 @@ jobs:
           test-command: ${{ matrix.test_command }}
           allow-major: ${{ matrix.allow_major }}
           create-issues: ${{ matrix.create_issues }}
+          strategy: ${{ matrix.strategy }}
           dry-run: 'true'
           github_token: ${{ github.token }}
 
       - name: Assert reported outputs (basic scenario)
-        if: matrix.scenario == 'basic'
+        # batch-fallback (strategy: batch-first, using the basic fixtures)
+        # must reproduce the exact same final outcome as plain per-package -
+        # idna's own update fails the test either way, so the batch as a
+        # whole fails and falls back to the per-package loop.
+        if: matrix.scenario == 'basic' || matrix.scenario == 'batch-fallback'
         env:
           PASSED: ${{ steps.update.outputs.passed-packages }}
           FAILED: ${{ steps.update.outputs.failed-packages }}
@@ -252,6 +310,26 @@ jobs:
               ;;
           esac
 
+          exit $status
+
+      - name: Assert exactly one test run (batch happy-path scenario)
+        # Must run before "Verify the fixture environment is healthy" below,
+        # which deliberately re-runs the test command once more itself and
+        # would otherwise inflate this count - both fixtures' check.py
+        # appends one line to test_runs.log per invocation (see
+        # tests/fixture/{uv,poetry}-batch/check.py). Every package in these
+        # fixtures updates cleanly, so strategy: batch-first's happy path
+        # should have tested the whole batch exactly once.
+        if: matrix.scenario == 'batch-happy'
+        working-directory: ${{ matrix.directory }}
+        run: |
+          status=0
+          runs="$(wc -l < test_runs.log | tr -d ' ')"
+          echo "test command ran $runs time(s)"
+          if [ "$runs" != "1" ]; then
+            echo "expected the test command to run exactly once, ran $runs times"
+            status=1
+          fi
           exit $status
 
       - name: Verify the fixture environment is healthy after the run

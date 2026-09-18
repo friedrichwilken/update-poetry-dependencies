@@ -1,6 +1,6 @@
 import pytest
 
-from updater.config import check_versions, parse_labels, resolve_base_branch
+from updater.config import check_strategy, check_versions, parse_labels, resolve_base_branch
 from updater.errors import ActionError
 
 
@@ -88,3 +88,19 @@ def test_resolve_base_branch_raises_when_detached_and_no_fallback():
 def test_resolve_base_branch_raises_when_current_branch_is_empty_and_no_fallback():
     with pytest.raises(ActionError):
         resolve_base_branch("", "", "")
+
+
+# --- strategy (issue #23) -------------------------------------------------
+
+
+def test_check_strategy_accepts_per_package():
+    check_strategy("per-package")  # should not raise
+
+
+def test_check_strategy_accepts_batch_first():
+    check_strategy("batch-first")  # should not raise
+
+
+def test_check_strategy_rejects_unknown_value():
+    with pytest.raises(ActionError):
+        check_strategy("bogus")

@@ -16,6 +16,8 @@ MIN_PROJECT_PYTHON_VERSION = {
 }
 MIN_POETRY_VERSION = "1.2"
 
+VALID_STRATEGIES = {"per-package", "batch-first"}
+
 _TRUE_VALUES = {"true", "1", "yes"}
 
 
@@ -44,6 +46,14 @@ def check_versions(package_manager: str, python_version: str, poetry_version: st
         raise ActionError(
             f"poetry-version {poetry_version} is below the minimum required "
             f"version {MIN_POETRY_VERSION}"
+        )
+
+
+def check_strategy(strategy: str) -> None:
+    if strategy not in VALID_STRATEGIES:
+        raise ActionError(
+            f"strategy '{strategy}' is invalid; must be one of: "
+            f"{', '.join(sorted(VALID_STRATEGIES))}"
         )
 
 
@@ -86,6 +96,7 @@ class Config:
     github_base_ref: str
     dry_run: bool
     allow_major: bool
+    strategy: str
     create_issues: bool
     issue_labels: str
     actor: str
@@ -116,6 +127,7 @@ class Config:
             github_base_ref=get("GITHUB_BASE_REF", ""),
             dry_run=parse_bool(get("DRY_RUN", "false")),
             allow_major=parse_bool(get("ALLOW_MAJOR", "false")),
+            strategy=get("STRATEGY", "per-package"),
             create_issues=parse_bool(get("CREATE_ISSUES", "false")),
             issue_labels=get("ISSUE_LABELS"),
             actor=get("GITHUB_ACTOR", "github-actions[bot]"),

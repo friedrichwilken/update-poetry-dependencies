@@ -5,7 +5,7 @@ import traceback
 
 from .backend import make_backend
 from .bootstrap import bootstrap
-from .config import Config, check_versions, parse_labels, resolve_base_branch
+from .config import Config, check_strategy, check_versions, parse_labels, resolve_base_branch
 from .detect import detect_package_manager
 from .errors import ActionError, UpdateAborted
 from .git_repo import GitRepo
@@ -24,6 +24,7 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
 
     package_manager = detect_package_manager(cfg.directory, cfg.package_manager)
     check_versions(package_manager, cfg.python_version, cfg.poetry_version)
+    check_strategy(cfg.strategy)
 
     runner = runner or CommandRunner()
     if backend is None:
@@ -82,6 +83,7 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=Non
             cfg.test_command,
             cfg.directory,
             allow_major=cfg.allow_major,
+            strategy=cfg.strategy,
         )
     except UpdateAborted as exc:
         # Some packages were already processed (and, for passing ones,

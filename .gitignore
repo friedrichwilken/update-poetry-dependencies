@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# batch-first e2e fixtures count test-command invocations here (see
+# tests/fixture/{uv,poetry}-batch/check.py) - never meant to be committed.
+tests/fixture/uv-batch/test_runs.log
+tests/fixture/poetry-batch/test_runs.log

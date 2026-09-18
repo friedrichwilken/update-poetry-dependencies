@@ -28,6 +28,8 @@ class FakeBackend:
         versions: dict | None = None,
         major_attempts: dict | None = None,
         manifest_file: str = "pyproject.toml",
+        update_all_ok: bool | None = None,
+        lock_snapshots: list | None = None,
     ):
         self.update_ok = update_ok or {}
         self._lock_exists = lock_exists
@@ -53,6 +55,21 @@ class FakeBackend:
         self._major_attempts = major_attempts or {}
         self.try_major_calls: list[str] = []
         self.major_files_to_stage_calls = 0
+        # update_all_ok controls update_all()'s result independently of
+        # update_ok (which drives the per-package update_package() path):
+        # None (default) derives it from update_ok - ok unless any package
+        # passed to update_all() is itself mapped to a failing
+        # update_ok - so a batch-first test that never cares about a
+        # resolution failure does not need to set this explicitly.
+        self._update_all_ok = update_all_ok
+        self.update_all_calls: list[list[str]] = []
+        # lock_snapshots is a list of dicts returned by successive
+        # all_locked_versions() calls (batch-first's replay-vs-batch lock
+        # comparison); once exhausted the last value keeps being returned.
+        # Defaults to a single {} so two calls compare equal (no
+        # divergence) unless a test deliberately sets differing snapshots.
+        self._lock_snapshots = list(lock_snapshots) if lock_snapshots is not None else [{}]
+        self.all_locked_versions_calls = 0
 
     def lock_exists(self) -> bool:
         return self._lock_exists
@@ -83,6 +100,14 @@ class FakeBackend:
         self.updated_packages.append(package)
         return result(self.update_ok.get(package, True))
 
+    def update_all(self, packages: list[str]) -> CommandResult:
+        self.update_all_calls.append(list(packages))
+        if self._update_all_ok is not None:
+            ok = self._update_all_ok
+        else:
+            ok = all(self.update_ok.get(p, True) for p in packages)
+        return result(ok, stderr="" if ok else "batch update failed")
+
     def sync(self) -> CommandResult:
         self.sync_calls += 1
         return result(self._sync_ok)
@@ -95,6 +120,12 @@ class FakeBackend:
         if len(seq) > 1:
             return seq.pop(0)
         return seq[0]
+
+    def all_locked_versions(self) -> dict:
+        self.all_locked_versions_calls += 1
+        if len(self._lock_snapshots) > 1:
+            return self._lock_snapshots.pop(0)
+        return self._lock_snapshots[0]
 
 
 class FakeGit:
@@ -110,6 +141,7 @@ class FakeGit:
         self._current_branch = current_branch
         self._uncommitted = uncommitted
         self.reset_calls: list[list[str]] = []
+        self.hard_reset_calls: list[str] = []
         self.staged_calls: list[list[str]] = []
         self.commit_messages: list[str] = []
         self.checkout_branches: list[str] = []
@@ -137,6 +169,10 @@ class FakeGit:
 
     def reset_files(self, paths: list[str]) -> None:
         self.reset_calls.append(list(paths))
+
+    def reset_hard(self, sha: str) -> CommandResult:
+        self.hard_reset_calls.append(sha)
+        return result(True)
 
     def stage(self, paths: list[str]) -> None:
         self.staged_calls.append(list(paths))

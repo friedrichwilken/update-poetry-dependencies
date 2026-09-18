@@ -842,3 +842,81 @@ def test_report_json_drops_beyond_constraint_output_tail_too_when_too_large():
     assert truncated
     for record in truncated:
         assert record.get("beyond_constraint_output_tail", "") == ""
+
+
+# --- strategy: batch-first (issue #23) -----------------------------------
+
+
+def test_report_json_includes_batch_first_additive_fields():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="a",
+                status="updated",
+                strategy="batch-first",
+                tested_in_batch=True,
+            )
+        ]
+    )
+
+    (record,) = json.loads(report_json(result))
+
+    assert record["strategy"] == "batch-first"
+    assert record["tested_in_batch"] is True
+    assert "batch_test_failed" not in record
+
+
+def test_report_json_includes_batch_test_failed_field():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(name="a", status="updated", strategy="batch-first", batch_test_failed=True)
+        ]
+    )
+
+    (record,) = json.loads(report_json(result))
+
+    assert record["batch_test_failed"] is True
+    assert "tested_in_batch" not in record
+
+
+def test_report_json_includes_bundled_with_field():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(
+                name="b",
+                status="updated",
+                strategy="batch-first",
+                tested_in_batch=True,
+                bundled_with="a",
+            )
+        ]
+    )
+
+    (record,) = json.loads(report_json(result))
+
+    assert record["bundled_with"] == "a"
+
+
+def test_report_json_omits_bundled_with_when_not_set():
+    (record,) = json.loads(report_json(UpdateResult(outcomes=[_outcome(name="a")])))
+    assert "bundled_with" not in record
+
+
+def test_render_body_shows_batch_fallback_banner_when_batch_test_failed():
+    result = UpdateResult(
+        outcomes=[
+            _outcome(name="a", status="updated", strategy="batch-first", batch_test_failed=True)
+        ]
+    )
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert "Batch update failed tests, fell back to per-package" in body
+
+
+def test_render_body_has_no_batch_fallback_banner_by_default():
+    result = UpdateResult(outcomes=[_outcome(name="a", status="updated")])
+
+    body = render_body(result, "https://example.com/run/1")
+
+    assert "Batch update failed tests" not in body
