@@ -35,10 +35,11 @@ jobs:
 
 Using Poetry? Change `test-command` to `'poetry run pytest'` — everything else auto-detects. Full walkthrough: [tutorial](docs/tutorials/weekly-updates.md).
 
-The default `GITHUB_TOKEN` above won't trigger your CI on the PR it opens — see [token and permissions](docs/manual/token-and-permissions.md) for why, and for a PAT that fixes it. PR creation also needs the repo setting **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** (off by default) — same page.
+Before the first run:
+- Turn on **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests** (off by default).
+- Want your CI to run on the PR? The default `GITHUB_TOKEN` can't trigger it: [use a PAT](docs/manual/token-and-permissions.md).
 
-## What you get
-A pull request with a report, e.g.:
+## What you get: one PR with a report
 
 ```markdown
 ## ✅ Updated
@@ -67,4 +68,3 @@ A pull request with a report, e.g.:
 - [Manual](docs/manual/README.md) — full reference for every input and output.
 - [How is this different from Dependabot / Renovate?](docs/manual/comparison.md)
 - [Migrating from v1](docs/manual/migrating-from-v1.md)
-- [This repo's own weekly workflow](.github/workflows/update_dependencies.yml) — a live example.

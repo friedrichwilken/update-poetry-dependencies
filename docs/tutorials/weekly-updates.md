@@ -33,7 +33,12 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}   # <- lets it push the branch and open the PR
 ```
 
-**What you should see:** on the next scheduled run (or a manual `workflow_dispatch`), a job named `update` runs, and — if any of your top-level packages have updates that pass `test-command` — a pull request titled "Update and successfully test packages" against your default branch, opened with the built-in `GITHUB_TOKEN`.
+**Before the first run:** turn on **Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"**. It is off by default, and without it GitHub refuses the PR.
+
+**What you should see:**
+
+- A job named `update` runs: on Monday, or when you press "Run workflow".
+- If any update passes your tests: a PR titled "Update and successfully test packages".
 
 ## 2. Try it safely first
 
@@ -65,7 +70,12 @@ jobs:
 
 Trigger it with `workflow_dispatch`, then open the run and scroll to its job summary — the same report a real run would put in the PR body is right there.
 
-**What you should see:** the job summary shows a "✅ Updated" table, a "🛑 Failed" table, and/or a one-line "⏭ No update available" list — whichever apply — but no branch is pushed and no PR appears; `git status` in the job is clean the whole time. See [`dry-run`](../manual/dry-run.md) and [the report](../manual/pr-report.md).
+**What you should see:**
+
+- The job summary shows the report: "✅ Updated", "🛑 Failed", "⏭ No update available".
+- No branch is pushed and no PR appears.
+
+More: [`dry-run`](../manual/dry-run.md), [the report](../manual/pr-report.md).
 
 Once you're happy with what you see, remove the `dry-run: 'true'` line (or set it to `'false'`).
 
@@ -98,9 +108,14 @@ jobs:
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}   # <- same PAT, for gh pr create/edit
 ```
 
-Create a fine-grained PAT (or GitHub App token) with `contents: write` and `pull-requests: write`, and store it as the `DEPS_UPDATE_TOKEN` repository secret. Either way — this token or the plain `GITHUB_TOKEN` — the repository setting **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests"** must also be on. Full detail: [Token and permissions](../manual/token-and-permissions.md).
+To set it up:
 
-**What you should see:** the next PR this action opens (or updates) now also shows your repository's normal required checks running against it, the way any other PR would.
+1. Create a fine-grained PAT (or a GitHub App token) for this repo with **Contents** and **Pull requests** set to read and write.
+2. Store it as the repository secret `DEPS_UPDATE_TOKEN`.
+
+More: [token and permissions](../manual/token-and-permissions.md).
+
+**What you should see:** your normal CI checks now run on the action's PR, like on any other PR.
 
 ## 4. Labels, title prefix, base branch, concurrency
 
@@ -177,7 +192,12 @@ jobs:
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
-**What you should see:** if your project has several updatable packages and they all still pass together, the run's log shows exactly one test invocation instead of one per package — the PR report is identical either way, plus `tested_in_batch: true` in `report-json`. See [`strategy`](../manual/strategies.md).
+**What you should see:**
+
+- One test run in the log instead of one per package, when everything passes together.
+- The same PR report as before.
+
+More: [`strategy`](../manual/strategies.md).
 
 ## 6. Beyond the declared constraint: `allow-major`
 
@@ -217,7 +237,12 @@ jobs:
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
-**What you should see:** for a package with a capped constraint and a newer release available, the PR now either shows it updated with `(raised)` next to its bump, or — if the raised attempt failed its tests — a new "⚠️ Held back" table naming it, with the plain in-range update applied instead. See [`allow-major`](../manual/allow-major.md).
+**What you should see,** for a package with a capped constraint and a newer release:
+
+- It is updated, with `(raised)` next to its bump. Or:
+- It shows up in a new "⚠️ Held back" table, and the normal in-range update is applied instead.
+
+More: [`allow-major`](../manual/allow-major.md).
 
 ## 7. Track what fails: `create-issues`
 
@@ -260,7 +285,13 @@ jobs:
           github_token: ${{ secrets.DEPS_UPDATE_TOKEN }}
 ```
 
-**What you should see:** the first time a package fails, a new issue titled `<pkg>: update to <version> fails (...)`, carrying a hidden identity marker and the `dependencies` label. It gets updated silently on later still-failing runs, and closes itself automatically once the package updates cleanly. See [`create-issues`](../manual/create-issues.md).
+**What you should see:**
+
+- The first time a package fails: a new issue, `<pkg>: update to <version> fails (...)`, with the `dependencies` label.
+- While it keeps failing: the same issue is updated. No duplicates.
+- Once it updates cleanly: the issue closes itself.
+
+More: [`create-issues`](../manual/create-issues.md).
 
 ## 8. Keep the rest fresh: `update-transitive`
 
@@ -309,7 +340,10 @@ jobs:
 
 **Re-sync note:** if `test-command` itself runs `uv run ...`, it re-syncs the environment first using **uv's own** default group selection, not this action's narrower `without-groups` one. If a test genuinely depends on the group being absent, use `uv run --no-sync ...` or `.venv/bin/python` directly instead. See [Package managers § `uv run` in `test-command` re-syncs](../manual/package-managers.md#uv-run-in-test-command-re-syncs).
 
-**What you should see:** an extra commit, `Update transitive dependencies`, when anything transitive had room to move — and, once `without-groups: dev` is set, any package that lives only in your `dev` group no longer appears in `report-json` at all.
+**What you should see:**
+
+- An extra commit, `Update transitive dependencies`, whenever something transitive could move.
+- With `without-groups: dev`: packages that live only in `dev` are left alone and are not in the report.
 
 ## 9. Hands-off: auto-merge the PR when CI is green
 
@@ -345,7 +379,7 @@ This only fires on a real `pull_request` event, which needs the PAT from step 3 
 
 A PR from a fork never receives this workflow's secrets, so `gh pr merge` could not authenticate even if the branch-name check above matched one — the extra repository-owner condition just makes that explicit rather than relying on it implicitly.
 
-**What you should see:** once your required checks pass on the update PR, it merges itself — no click required. If "Allow auto-merge" is off, `gh pr merge --auto` fails loudly instead of merging early; turn the setting on and re-run.
+**What you should see:** once the required checks pass, the PR merges itself. If "Allow auto-merge" is off, the step fails loudly instead: turn the setting on and re-run.
 
 ## 10. The final workflow
 
