@@ -8,3 +8,24 @@ updates:
       github-actions:
         patterns:
           - '*'
+
+  # tests/fixture/* are e2e fixtures that deliberately lock OLD (even
+  # vulnerable) versions so the action has something to update. Dependabot
+  # security updates would otherwise keep opening PRs to bump them, which
+  # would break the fixtures. Ignore everything under those directories.
+  - package-ecosystem: 'pip'
+    directories:
+      - '/tests/fixture/*'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: '*'
+  - package-ecosystem: 'uv'
+    directories:
+      - '/tests/fixture/*'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: '*'
