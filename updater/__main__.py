@@ -9,13 +9,14 @@ from .config import Config, check_versions, parse_labels, resolve_base_branch
 from .detect import detect_package_manager
 from .errors import ActionError, UpdateAborted
 from .git_repo import GitRepo
-from .github_pr import GithubPR, create_or_edit
+from .github_issues import issue_actions_to_json, run_issue_management, summarize_issue_actions
+from .github_pr import GithubPR, create_or_edit, parse_created_pr_number
 from .report import MAX_SUMMARY_CHARS, render_body, write_outputs
 from .runner import CommandRunner
 from .updater import UpdateResult, run_updates
 
 
-def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
+def run(cfg: Config, runner=None, backend=None, git=None, gh=None, gh_issues=None) -> int:
     # Guarantee the outputs are always set, even if something below fails
     # before a real UpdateResult exists. Any later write_outputs call below
     # overrides this with real (or partial) data.
@@ -89,6 +90,17 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
         # still failed, so re-raise once the report is written (the
         # already-made commits stay local/uncommitted-to-remote, exactly
         # like any other failure below the install step).
+        #
+        # create-issues is skipped entirely here (never just for the
+        # missing packages) - exc.result is a partial outcome list, and
+        # treating whatever is missing from it as "no longer failing"
+        # would incorrectly close issues for packages this run never even
+        # got to process.
+        if cfg.create_issues:
+            print(
+                "::notice::create-issues: skipped issue management for this run - "
+                "it aborted before completing, so the outcome list is only partial"
+            )
         partial_body = render_body(exc.result, run_url, aborted_reason=str(exc))
         partial_summary = render_body(
             exc.result,
@@ -111,33 +123,72 @@ def run(cfg: Config, runner=None, backend=None, git=None, gh=None) -> int:
     summary_body = render_body(
         result, run_url, max_chars=MAX_SUMMARY_CHARS, include_major_skip_notes=True
     )
-    write_outputs(
-        cfg.github_output, result, body, cfg.github_step_summary, summary_body=summary_body
-    )
     print(body)
 
-    if cfg.dry_run:
-        print("dry-run: skipping push and PR create/edit")
-        return 0
+    # Push/PR and (after it - see the README "create-issues" section)
+    # issue management both run under one `finally` so the report is
+    # still written even if either of them raises: the report is this
+    # action's primary product and must not be lost just because a later
+    # step failed.
+    pr_url: str | None = None
+    issue_actions: list = []
+    try:
+        if cfg.dry_run:
+            print("dry-run: skipping push and PR create/edit")
+        elif git.head_sha() == start_sha:
+            print("no packages updated, nothing to push")
+        else:
+            git.checkout_new_branch(cfg.branch_name)
+            push_result = git.push(cfg.branch_name)
+            if not push_result.ok:
+                raise ActionError(f"git push failed: {push_result.stderr}")
 
-    if git.head_sha() == start_sha:
-        print("no packages updated, nothing to push")
-        return 0
+            gh = gh or GithubPR(runner, cfg.directory)
+            title = f"{cfg.pr_title_prefix}Update and successfully test packages"
+            labels = parse_labels(cfg.pr_labels)
 
-    git.checkout_new_branch(cfg.branch_name)
-    push_result = git.push(cfg.branch_name)
-    if not push_result.ok:
-        raise ActionError(f"git push failed: {push_result.stderr}")
+            existing_pr, pr_result = create_or_edit(
+                gh, cfg.branch_name, title, body, base_branch, labels
+            )
+            print(
+                f"updated existing PR #{existing_pr}" if existing_pr is not None else "created PR"
+            )
 
-    gh = gh or GithubPR(runner, cfg.directory)
-    title = f"{cfg.pr_title_prefix}Update and successfully test packages"
-    labels = parse_labels(cfg.pr_labels)
+            if not pr_result.ok:
+                raise ActionError(f"gh pr create/edit failed: {pr_result.stderr}")
 
-    existing_pr, pr_result = create_or_edit(gh, cfg.branch_name, title, body, base_branch, labels)
-    print(f"updated existing PR #{existing_pr}" if existing_pr is not None else "created PR")
+            pr_number = existing_pr
+            if pr_number is None:
+                pr_number = parse_created_pr_number(pr_result.stdout)
+            if pr_number is not None:
+                pr_url = f"{cfg.server_url}/{cfg.repository}/pull/{pr_number}"
 
-    if not pr_result.ok:
-        raise ActionError(f"gh pr create/edit failed: {pr_result.stderr}")
+        # Runs after the PR create/edit above (pr_url is known by now, or
+        # deliberately still None for dry-run - see the README) and
+        # before returning. A failure here must never fail a run that
+        # already produced its primary product (the PR / the report) -
+        # see run_issue_management's docstring for why it does not catch
+        # its own exceptions.
+        if cfg.create_issues:
+            try:
+                issue_actions = run_issue_management(
+                    cfg, runner, result.outcomes, run_url, pr_url, gh_issues=gh_issues
+                )
+            except Exception as exc:  # deliberately broad - see the comment above
+                print(f"::warning::create-issues: failed to manage issues: {exc}")
+                issue_actions = []
+            summary_body = (
+                f"{summary_body}\n\n{summarize_issue_actions(issue_actions, cfg.dry_run)}\n"
+            )
+    finally:
+        write_outputs(
+            cfg.github_output,
+            result,
+            body,
+            cfg.github_step_summary,
+            summary_body=summary_body,
+            issue_actions_json=issue_actions_to_json(issue_actions),
+        )
 
     return 0
 

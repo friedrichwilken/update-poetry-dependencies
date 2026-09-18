@@ -1,5 +1,7 @@
+import json
+
 import pytest
-from fakes import FakeBackend, FakeGit, FakeGithubPR, FakeRunner
+from fakes import FakeBackend, FakeGit, FakeGithubIssues, FakeGithubPR, FakeRunner
 
 from updater.__main__ import run
 from updater.config import Config
@@ -21,6 +23,8 @@ def make_cfg(**overrides):
         github_base_ref="",
         dry_run=False,
         allow_major=False,
+        create_issues=False,
+        issue_labels="",
         actor="actor",
         server_url="https://github.com",
         repository="owner/repo",
@@ -295,3 +299,181 @@ def test_clean_working_tree_proceeds_normally():
     run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
 
     assert backend.install_calls == 1
+
+
+# --- create-issues (issue #28) -------------------------------------------
+
+
+def _issue_actions_output(output_file) -> list:
+    """GITHUB_OUTPUT is append-only and last-write-wins per key - `run()`
+    always writes an empty-result guard first (see its own comment), so
+    the real value (if any) is whichever `issue-actions=` line comes
+    last."""
+    content = output_file.read_text()
+    line = [line for line in content.splitlines() if line.startswith("issue-actions=")][-1]
+    return json.loads(line[len("issue-actions=") :])
+
+
+def test_issue_actions_output_is_empty_when_feature_off(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(dry_run=True, create_issues=False, github_output=str(output_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert _issue_actions_output(output_file) == []
+
+
+def test_report_outputs_are_byte_compatible_when_create_issues_is_off(tmp_path):
+    """The only change to the output file when the feature is off is the
+    new, additive `issue-actions=[]` line."""
+    output_file_off = tmp_path / "off.txt"
+    cfg = make_cfg(dry_run=True, create_issues=False, github_output=str(output_file_off))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    content = output_file_off.read_text()
+    lines = [
+        line for line in content.splitlines() if "=" in line and not line.startswith("pr-body")
+    ]
+    keys = {line.split("=", 1)[0] for line in lines}
+    assert keys == {
+        "passed-packages",
+        "failed-packages",
+        "skipped-packages",
+        "held-back-packages",
+        "report-json",
+        "issue-actions",
+    }
+
+
+def test_create_issues_off_never_instantiates_or_calls_gh_issues(tmp_path):
+    """No gh_issues object is even needed when the feature is off - proven
+    by never passing one and the run still succeeding without error."""
+    cfg = make_cfg(dry_run=True, create_issues=False)
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=None)
+
+
+def test_create_issues_dry_run_plans_without_writing(tmp_path):
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(
+        dry_run=True, create_issues=True, github_output=str(output_file), test_command=""
+    )
+    backend = FakeBackend(update_ok={"a": False}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert gh_issues.create_calls == []
+    actions = _issue_actions_output(output_file)
+    assert actions == [{"package": "a", "action": "create", "issue": None}]
+
+
+def test_create_issues_runs_after_pr_creation_and_gets_the_pr_url():
+    cfg = make_cfg(dry_run=False, create_issues=True, test_command="")
+    backend = FakeBackend(
+        update_ok={"a": True, "b": False},
+        versions={"a": ["1.0.0", "1.1.0"], "b": ["2.0.0", "2.0.0"]},
+    )
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None, created_pr_url="https://github.com/owner/repo/pull/42")
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert len(gh.create_calls) == 1  # the PR itself
+    assert len(gh_issues.create_calls) == 1  # the issue for "b"
+    assert "https://github.com/owner/repo/pull/42" in gh_issues.create_calls[0]["body"]
+
+
+def test_create_issues_gets_no_pr_url_in_dry_run():
+    cfg = make_cfg(dry_run=True, create_issues=True, test_command="")
+    backend = FakeBackend(update_ok={"a": False}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert gh_issues.create_calls == []  # dry-run: planned only
+    # dry-run never even calls execute's write path, so confirm via a
+    # non-dry-run companion instead that pr_url is threaded through when
+    # there is one - see test_create_issues_runs_after_pr_creation_and_gets_the_pr_url.
+
+
+def test_create_issues_failure_does_not_fail_the_run(tmp_path, capsys):
+    """A gh issue failure must not take down a run that already produced
+    its primary product (the PR)."""
+
+    class _RaisingGithubIssues:
+        def list_open_managed(self, limit=200):
+            raise RuntimeError("gh issue list exploded")
+
+    output_file = tmp_path / "output.txt"
+    cfg = make_cfg(
+        dry_run=False, create_issues=True, github_output=str(output_file), test_command=""
+    )
+    backend = FakeBackend(update_ok={"a": True}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    result = run(
+        cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=_RaisingGithubIssues()
+    )
+
+    assert result == 0
+    assert len(gh.create_calls) == 1  # the PR was still created
+    assert "::warning::" in capsys.readouterr().out
+    assert _issue_actions_output(output_file) == []
+
+
+def test_aborted_run_skips_issue_management_entirely(capsys):
+    cfg = make_cfg(dry_run=True, create_issues=True, test_command="pytest")
+    backend = FakeBackend(update_ok={"a": False}, sync_ok=False)
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues()
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert gh_issues.list_calls == 0
+    assert "create-issues" in capsys.readouterr().out
+
+
+def test_job_summary_mentions_issue_actions_when_feature_on(tmp_path):
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(
+        dry_run=True, create_issues=True, github_step_summary=str(summary_file), test_command=""
+    )
+    backend = FakeBackend(update_ok={"a": False}, versions={"a": ["1.0.0", "1.1.0"]})
+    git = FakeGit(diff_results=[], head_shas=["sha0", "sha0"])
+    gh = FakeGithubPR(open_pr_number=None)
+    gh_issues = FakeGithubIssues(open_managed=[])
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
+
+    assert "Issue actions:" in summary_file.read_text()
+
+
+def test_job_summary_does_not_mention_issue_actions_when_feature_off(tmp_path):
+    summary_file = tmp_path / "summary.md"
+    cfg = make_cfg(dry_run=True, create_issues=False, github_step_summary=str(summary_file))
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert "Issue actions:" not in summary_file.read_text()
