@@ -23,6 +23,7 @@ def make_cfg(**overrides):
         github_base_ref="",
         dry_run=False,
         allow_major=False,
+        strategy="per-package",
         create_issues=False,
         issue_labels="",
         actor="actor",
@@ -503,6 +504,22 @@ def test_job_summary_mentions_issue_actions_when_feature_on(tmp_path):
     run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh, gh_issues=gh_issues)
 
     assert "Issue actions:" in summary_file.read_text()
+
+
+# --- strategy (issue #23) -------------------------------------------------
+
+
+def test_invalid_strategy_fails_fast_before_any_work():
+    cfg = make_cfg(dry_run=True, strategy="bogus")
+    backend = FakeBackend(update_ok={"a": True})
+    git = FakeGit(diff_results=[True], head_shas=["sha0", "sha1"])
+    gh = FakeGithubPR(open_pr_number=None)
+
+    with pytest.raises(ActionError):
+        run(cfg, runner=FakeRunner(), backend=backend, git=git, gh=gh)
+
+    assert backend.install_calls == 0
+    assert backend.updated_packages == []
 
 
 def test_job_summary_does_not_mention_issue_actions_when_feature_off(tmp_path):
