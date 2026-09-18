@@ -16,6 +16,55 @@ jobs:
       - name: Lint workflows and action.yml
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install actionlint (pinned, checksum-verified)
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          # Commit the v1.7.12 tag points at (verified via `gh api
+          # repos/rhysd/actionlint/git/refs/tags/v1.7.12`) - the download
+          # script itself is fetched from this exact commit instead of
+          # `main`, so a compromised `main` can't swap in a different
+          # script for this job to run.
+          ACTIONLINT_SCRIPT_SHA: '914e7df21a07ef503a81201c76d2b11c789d3fca'
+        run: |
+          set -euo pipefail
+          mkdir -p ./bin
+
+          curl -sSL -o /tmp/download-actionlint.bash \
+            "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_SCRIPT_SHA}/scripts/download-actionlint.bash"
+          bash /tmp/download-actionlint.bash "$ACTIONLINT_VERSION" ./bin
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+          # The download script above does not verify a checksum itself,
+          # so do it here: fetch the same release's published
+          # actionlint_<ver>_checksums.txt plus the matching platform
+          # archive, verify the archive's sha256, then diff the binary it
+          # contains against what the script just installed.
+          ARCHIVE="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSL -o "/tmp/actionlint_${ACTIONLINT_VERSION}_checksums.txt" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          curl -sSL -o "/tmp/$ARCHIVE" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$ARCHIVE"
+          (
+            cd /tmp
+            # sha256sum -c needs the checked file's name (as recorded in
+            # the checksums file) to match what's actually on disk - kept
+            # identical to the release asset's own filename above so this
+            # never silently checks the wrong file.
+            grep "$ARCHIVE\$" "actionlint_${ACTIONLINT_VERSION}_checksums.txt" | sha256sum -c -
+          )
+          mkdir -p /tmp/actionlint-verify
+          tar -xzf "/tmp/$ARCHIVE" -C /tmp/actionlint-verify actionlint
+          cmp ./bin/actionlint /tmp/actionlint-verify/actionlint
+
+      - name: Render documented workflow examples (uv and Poetry) and lint them
+        run: python3 .github/scripts/lint_docs_workflows.py
+
   unit-tests:
     runs-on: ubuntu-latest
     steps:

@@ -44,6 +44,16 @@ def _outcome(**overrides) -> PackageOutcome:
     return PackageOutcome(**base)
 
 
+_OLD_FOOTER_BEFORE_RENAME = (
+    "_This issue is managed automatically by the "
+    "[update-poetry-dependencies]"
+    "(https://github.com/friedrichwilken/update-poetry-dependencies) "
+    "action's `create-issues` feature: it is updated on every run while the "
+    "package keeps failing or being held back, and closed automatically "
+    "once it no longer is. It should not be edited by hand._"
+)
+
+
 def _managed_body(package: str, version: str = "", kind: str = "") -> str:
     """A realistic managed-issue body: all three of the pkg marker, the
     state marker, and the managed-by footer - what `render_issue_body`
@@ -222,6 +232,49 @@ def test_parse_managed_issues_copy_pasted_body_is_accepted_edge_case():
     raw = [{"number": 5, "body": _managed_body("idna", version="4.0.0", kind="test")}]
     managed = parse_managed_issues(raw)
     assert len(managed) == 1
+
+
+def test_parse_managed_issues_survives_a_repo_rename():
+    """Regression test for the real bug found by review after
+    friedrichwilken/update-poetry-dependencies -> test-gated-python-updates:
+    identity used to require _MANAGED_BY_FOOTER as an exact substring, which
+    embeds the repo name/URL - a rename silently broke recognition of every
+    issue a pre-rename run had created. The hidden managed marker carries no
+    repo-specific content, so it survives a rename unchanged."""
+    raw = [
+        {
+            "number": 6,
+            "body": (
+                "<!-- test-gated-updates:pkg=idna -->\nsome body text\n\n"
+                f"{_OLD_FOOTER_BEFORE_RENAME}\n"
+                "<!-- test-gated-updates:managed -->\n"
+                "<!-- test-gated-updates:state=4.0|test -->"
+            ),
+        }
+    ]
+    managed = parse_managed_issues(raw)
+    assert len(managed) == 1
+    assert managed[0].package == "idna"
+
+
+def test_parse_managed_issues_recognizes_pre_marker_issues_via_footer_text_alone():
+    """An issue created by a run from *before* the managed marker existed
+    at all (old repo name in the footer link, no managed marker) must still
+    be recognized - via the footer's fixed sentence, link ignored - so this
+    fix does not orphan every issue already open when it ships."""
+    raw = [
+        {
+            "number": 7,
+            "body": (
+                "<!-- test-gated-updates:pkg=six -->\n"
+                f"{_OLD_FOOTER_BEFORE_RENAME}\n"
+                "<!-- test-gated-updates:state=1.16.0|test -->"
+            ),
+        }
+    ]
+    managed = parse_managed_issues(raw)
+    assert len(managed) == 1
+    assert managed[0].package == "six"
 
 
 # --- plan_issue_actions: decision table ------------------------------------
@@ -533,6 +586,7 @@ def test_render_issue_body_contains_marker_versions_and_links():
     )
     assert "<!-- test-gated-updates:pkg=idna -->" in body
     assert "<!-- test-gated-updates:state=4.0|test -->" in body
+    assert "<!-- test-gated-updates:managed -->" in body
     assert "3.0" in body and "4.0" in body
     assert "boom output" in body
     assert "https://example/run/1" in body
