@@ -63,7 +63,8 @@ a tutorial that stops to list every option loses the learner; a reference page t
 ### README rules
 
 1. **Hard length limit** (here: 70 lines, enforced by a test). A limit you can fail is the only kind that holds.
-2. Order: one-sentence pitch → 3 bullets of "why" → **one complete, copy-pasteable quick start** → a small sample of the result → feature one-liners, each linking into the manual → links to tutorials.
+2. Order: one sentence on what it is → **Why** → **one complete, copy-pasteable quick start** → a small sample of the result → feature one-liners, each linking into the manual → links to tutorials.
+   - **Why** comes before how. State the reader's problem in their words (here: "a red bulk-bump PR tells you something broke, not what"), then the payoff, in two short paragraphs. A description of what a tool does is not a reason to care.
 3. The quick start uses **zero optional settings**. Never explain a default in the README.
 4. **No option tables, no internals, no history, no caveats.** They go in the manual. If a caveat matters for the quick start, the quick start is wrong.
 5. Show the output (here: a few lines of the PR report). People want to see what they get.
@@ -71,10 +72,12 @@ a tutorial that stops to list every option loses the learner; a reference page t
 ### Tutorial rules
 
 1. One tutorial that **builds one artefact step by step**; each step adds exactly one capability.
-2. **Every step shows the complete file so far**, with new lines marked `# new`. The reader can stop at any step with something that works. (FastAPI's tutorial is the model.)
-3. 3–6 sentences of prose per step, then "what you should see".
-4. **One tutorial for variants, not one per variant.** When two setups differ in a few lines, write for the default and mark the differing lines inline: `test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'`. Never use commented-out alternative blocks — they get copy-pasted and rot. Parallel tutorials are 95% duplication and drift apart.
-5. Details belong in the manual; link to it, do not repeat it.
+2. **Every step shows the complete file so far.** The reader can stop at any step with something that works. (FastAPI's tutorial is the model.)
+3. **New lines carry a trailing comment that says what they do**: `dry-run: 'true'   # <- does everything except push and open the PR`. Not `# new` — that marks the line but teaches nothing. Yes, it repeats the prose; impatient readers only skim the code, so the code must explain itself. A line keeps its arrow only in the step that introduces it; the final recap has none. A test enforces this.
+4. **Explain cryptic syntax inline**, where it appears: `cron: '0 6 * * 1'   # <- every Monday at 06:00 UTC`. Nobody reads cron.
+5. **The intro is two sentences and a few bullets**: what we build, then the conventions. Do not explain the tutorial's method in paragraphs — start. 3–4 short sentences per step, then "what you should see".
+6. **One tutorial for variants, not one per variant.** When two setups differ in a few lines, write for the default and mark the differing lines inline: `test-command: 'uv run pytest'   # Poetry: 'poetry run pytest'`. Never use commented-out alternative blocks — they get copy-pasted and rot. Parallel tutorials are 95% duplication and drift apart.
+7. Details belong in the manual; link to it, do not repeat it.
 
 ### Manual rules
 
@@ -90,6 +93,8 @@ Docs rot silently, so they are tested like code:
 - every input/output in `action.yml` is documented, and documented defaults match;
 - every YAML example only uses inputs that exist; complete example workflows are linted in CI against the local action;
 - variant comments (`# Poetry: ...`) are applied mechanically and the result is validated too;
+- tutorial steps are diffed: every new or changed line must carry its `# <-` comment, and nothing else may;
+- samples of output shown in the README are compared with what the code really renders;
 - every relative link and anchor resolves;
 - the README length limit.
 
@@ -98,6 +103,8 @@ no test can check, verify it against the code before writing it.
 
 ### Writing style
 
+A wall of text can appear anywhere, not only in the README — a three-paragraph tutorial intro is one. If a block of prose explains the document instead of the subject, cut it.
+
 Plain words, short sentences, second person in tutorials. Lead with the common case. Say what something does
 before why. Prefer a 5-line example over a paragraph. If a page needs a table of contents, split it.
 
@@ -105,6 +112,6 @@ before why. Prefer a 5-line example over a paragraph. If a page needs a table of
 
 - [ ] Does the README still fit the limit, and does the quick start still work by copy-paste?
 - [ ] Is each new fact in exactly one place?
-- [ ] Tutorial step: complete file shown, new lines marked, one capability?
+- [ ] Tutorial step: complete file shown, new lines explained with `# <-`, one capability?
 - [ ] Manual page: answer first, one question?
 - [ ] `uv run pytest tests/unit` (docs tests) green?
